@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2026"
 
 [dependencies]
-lumen = { git = "https://github.com/dubhlux/lumen.git" }
-obsid = { git = "https://github.com/dubhlux/obsid.git" }
+lumen = { git = "https://github.com/almide-graphics/lumen.git" }
+obsid = { git = "https://github.com/almide-graphics/obsid.git" }

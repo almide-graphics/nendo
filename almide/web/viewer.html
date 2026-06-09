@@ -111,57 +111,33 @@
       const data = new Uint8Array(arrayBuffer);
       const memory = wasmMemory;
 
-      // Allocate Bytes in WASM via __alloc: [i32 len][data...]
-      const totalSize = 4 + data.length;
-      const ptr = wasmExports.__alloc(totalSize);
-      const dv = new DataView(memory.buffer);
-      dv.setInt32(ptr, data.length, true);
+      // Marshal the file as an almide Bytes value: [i32 len][raw bytes...]
+      const ptr = wasmExports.__alloc(4 + data.length);
+      new DataView(memory.buffer).setInt32(ptr, data.length, true);
       new Uint8Array(memory.buffer, ptr + 4, data.length).set(data);
 
-      // Try 3D rendering first, fallback to inspect
-      const fn3d = wasmExports.load_vrm_3d;
-      let resultPtr;
+      // load_vrm_data parses the GLB/VRM, uploads every primitive's mesh and
+      // textures into obsid, and returns the number of primitives loaded
+      // (0 = not a valid GLB/VRM, or no meshes). It returns a plain count —
+      // not a JSON string.
+      let prims;
       try {
-        resultPtr = fn3d ? fn3d(ptr) : wasmExports.inspect(ptr);
+        prims = Number(wasmExports.load_vrm_data(ptr));
       } catch(e) {
-        console.warn("load_vrm_3d failed, falling back to inspect:", e.message);
-        // Re-alloc since memory may have been corrupted
-        const ptr2 = wasmExports.__alloc(4 + data.length);
-        new DataView(memory.buffer).setInt32(ptr2, data.length, true);
-        new Uint8Array(memory.buffer, ptr2 + 4, data.length).set(data);
-        resultPtr = wasmExports.inspect(ptr2);
+        console.error("load_vrm_data threw:", e);
+        infoEl.textContent = "Load error: " + e.message;
+        return;
       }
-      const resultStr = readWasmString(memory, resultPtr);
 
-      let result;
-      try { result = JSON.parse(resultStr); } catch { result = { ok: false, error: resultStr }; }
-
-      if (result.error) {
-        infoEl.textContent = `Error: ${result.error}`;
-      } else if (result.ok !== undefined) {
-        // load_vrm_3d result
-        if (result.ok) {
-          infoEl.textContent = `nendo — ${result.meshes} mesh(es) loaded`;
-          dropzone.classList.add("hidden");
-          canvas.classList.remove("hidden");
-          statsEl.classList.remove("hidden");
-          startRenderLoop();
-        } else {
-          infoEl.textContent = `Render error: ${result.error}`;
-        }
-      } else {
-        // inspect result
-        infoEl.textContent = `nendo — ${result.title || '(untitled)'} | v${result.version} | ${result.meshes} meshes, ${result.nodes} nodes`;
+      if (prims > 0) {
+        infoEl.textContent = `nendo — ${prims} primitive(s) loaded`;
         dropzone.classList.add("hidden");
+        canvas.classList.remove("hidden");
+        statsEl.classList.remove("hidden");
+        startRenderLoop();
+      } else {
+        infoEl.textContent = "Failed to load — not a valid GLB/VRM, or it has no meshes";
       }
-    }
-
-    function readWasmString(memory, ptr) {
-      const view = new Uint8Array(memory.buffer);
-      // almide WASM strings: [i32 len][bytes...]
-      const len = new DataView(memory.buffer).getInt32(ptr, true);
-      const bytes = view.slice(ptr + 4, ptr + 4 + len);
-      return new TextDecoder().decode(bytes);
     }
 
     // ── Render Loop ──
@@ -172,11 +148,12 @@
       rendering = true;
 
       let frames = 0, lastTime = performance.now();
-      function loop() {
-        if (wasmExports.render_frame) wasmExports.render_frame();
+      function loop(now) {
+        // render_frame(t) takes elapsed time in seconds (for any time-based
+        // animation); its i32 return is unused.
+        wasmExports.render_frame(now * 0.001);
 
         frames++;
-        const now = performance.now();
         if (now - lastTime >= 500) {
           const fps = (frames * 1000 / (now - lastTime)).toFixed(1);
           statsEl.textContent = `${fps} fps`;
@@ -187,12 +164,13 @@
       }
       requestAnimationFrame(loop);
 
-      // Pointer events → WASM orbit camera
+      // Pointer events → WASM orbit camera.
+      // The button param is an almide Int (wasm i64), so it must be a BigInt.
       canvas.addEventListener("pointerdown", e => {
-        wasmExports.on_pointer_down?.(e.clientX, e.clientY);
+        wasmExports.on_pointer_down?.(e.clientX, e.clientY, BigInt(e.button));
       });
-      canvas.addEventListener("pointerup", () => {
-        wasmExports.on_pointer_up?.();
+      canvas.addEventListener("pointerup", e => {
+        wasmExports.on_pointer_up?.(e.clientX, e.clientY, BigInt(e.button));
       });
       canvas.addEventListener("pointermove", e => {
         wasmExports.on_pointer_move?.(e.clientX, e.clientY);
