@@ -2,78 +2,122 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>nendo studio — Almide MToon VRM editor</title>
+<title>nendo studio — Almide VRM Studio</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html,body { height:100%; overflow:hidden; background:#14141c; color:#cfd; font:13px/1.5 -apple-system,system-ui,sans-serif; }
   #wrap { display:flex; height:100vh; }
   #view { flex:1; position:relative; touch-action:none; }
   canvas { display:block; width:100%; height:100%; }
-  #panel { width:300px; background:#1b1b26; border-left:1px solid #2a2a3a; overflow-y:auto; padding:12px; }
-  #panel h2 { font-size:12px; color:#8a8aa0; text-transform:uppercase; letter-spacing:.08em; margin:14px 0 6px; }
-  .slider { display:flex; align-items:center; gap:8px; margin:3px 0; }
-  .slider label { width:110px; font-size:12px; color:#aab; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #panel { width:320px; background:#1b1b26; border-left:1px solid #2a2a3a; display:flex; flex-direction:column; }
+  #tabs { display:flex; border-bottom:1px solid #2a2a3a; }
+  #tabs button { flex:1; padding:10px 0; background:none; border:none; color:#8a8aa0; font-size:13px; cursor:pointer; border-bottom:2px solid transparent; }
+  #tabs button.active { color:#fff; border-bottom-color:#6c63ff; }
+  #tabbody { flex:1; overflow-y:auto; padding:12px; }
+  .tab { display:none; } .tab.active { display:block; }
+  h2 { font-size:11px; color:#8a8aa0; text-transform:uppercase; letter-spacing:.08em; margin:14px 0 6px; }
+  .slider { display:flex; align-items:center; gap:8px; margin:4px 0; }
+  .slider label { width:104px; font-size:12px; color:#aab; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .slider input[type=range] { flex:1; accent-color:#6c63ff; }
-  .slider span { width:34px; text-align:right; font-family:monospace; font-size:11px; color:#7c7; }
-  details summary { cursor:pointer; color:#8a8aa0; font-size:12px; margin:10px 0 4px; }
+  .slider .val { width:42px; text-align:right; font-family:monospace; font-size:11px; color:#9c9cc0; background:#232332; border-radius:4px; padding:1px 4px; }
+  .crow { display:flex; align-items:center; gap:8px; margin:5px 0; }
+  .crow label { width:60px; font-size:12px; color:#aab; }
+  .crow input[type=color] { width:30px; height:26px; border:1px solid #3a3a52; border-radius:6px; background:#26263a; padding:1px; cursor:pointer; }
+  .crow .hex { flex:1; font-family:monospace; font-size:12px; background:#232332; border:1px solid #3a3a52; color:#cfd; border-radius:4px; padding:3px 8px; }
+  .crow .clr { background:none; border:none; color:#667; cursor:pointer; font-size:13px; }
+  #texgrid { display:flex; flex-wrap:wrap; gap:6px; }
+  #texgrid img { width:60px; height:60px; object-fit:cover; border:1px solid #3a3a52; border-radius:6px; cursor:pointer; background:#111; }
+  #texgrid img.replaced { border-color:#6c63ff; }
+  #savebar { padding:10px 12px; border-top:1px solid #2a2a3a; display:flex; gap:8px; }
+  #savebar button { flex:1; padding:8px 0; background:#6c63ff; color:#fff; border:none; border-radius:8px; cursor:pointer; font-size:13px; }
+  #savebar button.secondary { background:#26263a; color:#aab; flex:0 0 auto; padding:8px 12px; }
   #drop { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; z-index:10; pointer-events:none; }
   #drop.active { background:rgba(0,0,0,.6); pointer-events:auto; }
   #label { border:2px dashed #444; border-radius:14px; padding:28px 40px; color:#8a8aa0; text-align:center; pointer-events:auto; cursor:pointer; }
   #label:hover { border-color:#6c63ff; color:#cfd; }
   #status { position:absolute; left:12px; bottom:10px; font-family:monospace; font-size:11px; color:#7c7; z-index:11; }
   .hidden { display:none !important; }
-  button.reset { margin:8px 0; padding:4px 10px; background:#26263a; color:#aab; border:1px solid #3a3a52; border-radius:6px; cursor:pointer; font-size:12px; }
-  button.reset:hover { color:#fff; border-color:#6c63ff; }
+  input[type=text] { width:100%; background:#232332; border:1px solid #3a3a52; color:#cfd; border-radius:4px; padding:4px 8px; font-size:12px; }
 </style>
 </head>
 <body>
 <div id="wrap">
   <div id="view">
     <canvas id="canvas"></canvas>
-    <div id="drop"><div id="label">Drop a .vrm / .glb file<br><small>Almide owns MToon shading + morph math; JS parses glTF (interim, #470)</small>
+    <div id="drop"><div id="label">Drop a .vrm / .glb file<br><small>Almide owns MToon shading + morph math</small>
       <input id="file" type="file" accept=".vrm,.glb" class="hidden"></div></div>
     <div id="status">loading wasm…</div>
   </div>
   <div id="panel">
-    <button class="reset" id="saveVrm" style="width:100%;margin:0 0 4px">💾 Save .vrm</button>
-    <div class="slider"><label>Title</label><input id="metaTitle" type="text" style="flex:1;background:#26263a;border:1px solid #3a3a52;color:#cfd;border-radius:4px;padding:2px 6px;font-size:12px"></div>
-    <h2>Colors</h2>
-    <div id="colors"></div>
-    <h2>Textures</h2>
-    <div id="textures" style="display:flex;flex-wrap:wrap;gap:6px"></div>
-    <h2>Expressions</h2>
-    <div id="exprs"><i style="color:#556">load a VRM…</i></div>
-    <button class="reset" id="resetExpr">Reset all</button>
-    <details><summary>Raw morph targets</summary><div id="morphs"></div></details>
+    <div id="tabs">
+      <button data-tab="look" class="active">ルック</button>
+      <button data-tab="expr">表情</button>
+      <button data-tab="detail">詳細</button>
+    </div>
+    <div id="tabbody">
+      <div class="tab active" id="tab-look">
+        <h2>カラー</h2>
+        <div id="colors"></div>
+        <h2>テクスチャ <span style="text-transform:none;color:#667">(クリックで差し替え)</span></h2>
+        <div id="texgrid"></div>
+        <h2>メタ</h2>
+        <div class="crow"><label>Title</label><input id="metaTitle" type="text"></div>
+      </div>
+      <div class="tab" id="tab-expr"><div id="exprs"></div></div>
+      <div class="tab" id="tab-detail"><div id="morphs"></div></div>
+    </div>
+    <div id="savebar">
+      <button id="saveVrm">💾 .vrm を保存</button>
+      <button id="resetAll" class="secondary">リセット</button>
+    </div>
   </div>
 </div>
 
 <script src="webgl.js"></script>
 <script>
-const status = document.getElementById("status");
-const dropEl = document.getElementById("drop");
-const fileEl = document.getElementById("file");
+const status=document.getElementById("status");
+const dropEl=document.getElementById("drop");
+const fileEl=document.getElementById("file");
 let inst=null, mem=null;
 
-// ── boot ──
-const cv = document.getElementById("canvas");
-const view = document.getElementById("view");
-const dpr = window.devicePixelRatio||1;
-cv.width  = Math.round(view.clientWidth*dpr);
-cv.height = Math.round(view.clientHeight*dpr);
+// ════════ document model: params are the source of truth ════════
+// Every edit mutates `doc.params`; the .vrm bytes are DERIVED from
+// doc.originalBuf + params (non-destructive, idempotent, no quality decay).
+let doc=null; // { originalBuf, json, binOff, params:{ colors:{group:hex}, texOverride:{imgIdx:Uint8Array}, title }, meshPrims, targetNames, ui:{expr:{name:v}, morph:{"mi:ti":v}} }
 
-AlmideWebGL.load("viewer_webgl.wasm","canvas").then((i)=>{
+// ── tabs ──
+document.querySelectorAll("#tabs button").forEach(b=>b.addEventListener("click",()=>{
+  document.querySelectorAll("#tabs button").forEach(x=>x.classList.toggle("active",x===b));
+  document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.id==="tab-"+b.dataset.tab));
+}));
+
+// ── boot ──
+const cv=document.getElementById("canvas");
+const view=document.getElementById("view");
+const dpr=window.devicePixelRatio||1;
+cv.width=Math.round(view.clientWidth*dpr);
+cv.height=Math.round(view.clientHeight*dpr);
+
+AlmideWebGL.load("viewer_webgl.wasm","canvas").then(i=>{
   inst=i; mem=i.exports.memory;
   inst.exports.set_aspect(view.clientWidth/view.clientHeight);
-  status.textContent="ready (editor v5) — drop a VRM";
+  status.textContent="ready (studio v7) — drop a VRM";
   wirePointer();
   fetch("sample.vrm").then(r=>r.ok?r.arrayBuffer():Promise.reject())
-    .then(loadVRM).then(applyUrlParams).catch(()=>{});
+    .then(b=>openDocument(b)).then(applyUrlParams).catch(()=>{});
 }).catch(e=>{ status.textContent="wasm error: "+e.message; console.error(e); });
 
 // ── glTF helpers ──
 const compSize=ct=>ct===5126||ct===5125?4:ct===5123||ct===5122?2:1;
 const numComp=t=>({SCALAR:1,VEC2:2,VEC3:3,VEC4:4,MAT4:16})[t];
+function glbChunks(buf){
+  const dv=new DataView(buf);const total=dv.getUint32(8,true);
+  let off=12,jsonStr=null,binOff=0;
+  while(off+8<=total){const cl=dv.getUint32(off,true),ct=dv.getUint32(off+4,true);off+=8;
+    if(ct===0x4E4F534A)jsonStr=new TextDecoder().decode(new Uint8Array(buf,off,cl));
+    else if(ct===0x004E4942)binOff=off; off+=cl;}
+  return {json:JSON.parse(jsonStr),binOff};
+}
 function accF32(buf,binOff,json,idx){
   const a=json.accessors[idx],bv=json.bufferViews[a.bufferView];
   const base=binOff+(bv.byteOffset||0)+(a.byteOffset||0),nc=numComp(a.type);
@@ -89,13 +133,14 @@ function accIdx(buf,binOff,json,idx){
   for(let i=0;i<a.count;i++)o[i]=ct===5125?d.getUint32(base+i*4,true):ct===5123?d.getUint16(base+i*2,true):d.getUint8(base+i);
   return o;
 }
-function matTexBytes(buf,binOff,json,mi){
-  const m=json.materials&&json.materials[mi]; if(!m)return null;
-  const bct=m.pbrMetallicRoughness&&m.pbrMetallicRoughness.baseColorTexture; if(!bct)return null;
-  const img=json.images[json.textures[bct.index].source];
-  if(img.bufferView==null)return null;
-  const bv=json.bufferViews[img.bufferView];
+function imgBytes(buf,binOff,json,i){
+  const bv=json.bufferViews[json.images[i].bufferView];
   return new Uint8Array(buf,binOff+(bv.byteOffset||0),bv.byteLength);
+}
+function matTexImage(json,mi){
+  const m=json.materials&&json.materials[mi]; if(!m)return null;
+  const bct=m.pbrMetallicRoughness&&m.pbrMetallicRoughness.baseColorTexture;
+  return bct?json.textures[bct.index].source:null;
 }
 function shade(json,mi){
   const m=json.materials&&json.materials[mi];
@@ -113,45 +158,21 @@ function outline(json,mi){
   const c=mt.outlineColorFactor||[0,0,0];
   return [mt.outlineWidthFactor||0,c[0],c[1],c[2]];
 }
-function buildVerts(pos,norm,uv,count,out){
-  for(let i=0;i<count;i++){const o=i*11;
-    out[o]=pos[i*3];out[o+1]=pos[i*3+1];out[o+2]=pos[i*3+2];
-    if(norm){out[o+3]=norm[i*3];out[o+4]=norm[i*3+1];out[o+5]=norm[i*3+2];}else{out[o+3]=0;out[o+4]=1;out[o+5]=0;}
-    out[o+6]=1;out[o+7]=1;out[o+8]=1;
-    if(uv){out[o+9]=uv[i*2];out[o+10]=uv[i*2+1];}else{out[o+9]=0;out[o+10]=0;}
-  }
-}
-function poolWriteF32(arr){
-  const p=Number(inst.exports.pool_alloc(BigInt(arr.length*4)));
-  if(!p){ console.warn("pool exhausted"); return 0; }
-  new Float32Array(mem.buffer,p,arr.length).set(arr);
-  return p;
-}
-function put(t,C){ const p=Number(inst.exports.__alloc(t.byteLength)); new C(mem.buffer,p,t.length).set(t); return p; }
 
-// ── model state for the editor ──
-let model = null;  // { json, meshPrims: meshIdx→[pid], targetNames: meshIdx→[names], dirty:Set }
-let currentBuf = null;  // the document IS the .vrm bytes (GLB ArrayBuffer)
-
-// ── GLB repack: the editor's only mutation primitive ──
-// Rebuilds JSON + BIN chunks. imageReplacements: {imageIdx: Uint8Array(png/jpg)}.
-// mutateJson(json) may patch metadata etc. Returns a new ArrayBuffer.
-function repackGLB(buf, mutateJson, imageReplacements={}){
-  const dv=new DataView(buf);
-  const total=dv.getUint32(8,true);
-  let off=12,jsonStr=null,binOff=0,binLen=0;
+// ── GLB repack ──
+function repackGLB(buf,mutateJson,imageReplacements={}){
+  const dv=new DataView(buf);const total=dv.getUint32(8,true);
+  let off=12,jsonStr=null,binOff=0;
   while(off+8<=total){const cl=dv.getUint32(off,true),ct=dv.getUint32(off+4,true);off+=8;
     if(ct===0x4E4F534A)jsonStr=new TextDecoder().decode(new Uint8Array(buf,off,cl));
-    else if(ct===0x004E4942){binOff=off;binLen=cl;} off+=cl;}
+    else if(ct===0x004E4942)binOff=off; off+=cl;}
   const json=JSON.parse(jsonStr);
   if(mutateJson)mutateJson(json);
-  // map imageIdx → bufferView idx to replace
   const bvRepl={};
   for(const [imgIdx,bytes] of Object.entries(imageReplacements)){
     const bvi=json.images[imgIdx].bufferView;
     if(bvi!=null)bvRepl[bvi]=bytes;
   }
-  // rebuild BIN: copy every bufferView (or its replacement) 4-aligned
   const parts=[];let cur=0;
   (json.bufferViews||[]).forEach((bv,i)=>{
     const src=bvRepl[i]!==undefined?bvRepl[i]:new Uint8Array(buf,binOff+(bv.byteOffset||0),bv.byteLength);
@@ -160,7 +181,6 @@ function repackGLB(buf, mutateJson, imageReplacements={}){
     const pad=(4-(cur%4))%4; if(pad){parts.push(new Uint8Array(pad));cur+=pad;}
   });
   if(json.buffers&&json.buffers[0])json.buffers[0].byteLength=cur;
-  // serialize
   let jb=new TextEncoder().encode(JSON.stringify(json));
   const jpad=(4-(jb.length%4))%4;
   if(jpad){const j2=new Uint8Array(jb.length+jpad);j2.set(jb);j2.fill(0x20,jb.length);jb=j2;}
@@ -173,26 +193,114 @@ function repackGLB(buf, mutateJson, imageReplacements={}){
   for(const part of parts){ou.set(part,p);p+=part.length;}
   return out;
 }
-function applyEdit(mutateJson,imageReplacements){
-  currentBuf=repackGLB(currentBuf,mutateJson,imageReplacements);
-  loadVRM(currentBuf);
+
+// ── semantic color groups ──
+const COLOR_GROUPS=[
+  {key:"髪", test:n=>/_HAIR/i.test(n)},
+  {key:"瞳", test:n=>/EyeIris/i.test(n)},
+  {key:"肌", test:n=>/_SKIN/i.test(n)},
+  {key:"服", test:n=>/_CLOTH|Onepiece|Tops|Bottoms/i.test(n)},
+  {key:"靴", test:n=>/Shoes/i.test(n)},
+];
+function groupImages(json,test){
+  const imgs=new Set();
+  (json.materials||[]).forEach(m=>{
+    if(!test(m.name||""))return;
+    const src=matTexImage(json,(json.materials||[]).indexOf(m));
+    if(src!=null)imgs.add(src);
+  });
+  return [...imgs];
+}
+function recolorBytes(srcBytes,hex){
+  return new Promise(res=>{
+    const im=new Image();
+    im.onload=()=>{
+      const c=document.createElement("canvas");c.width=im.width;c.height=im.height;
+      const g=c.getContext("2d");g.drawImage(im,0,0);
+      const id=g.getImageData(0,0,c.width,c.height),px=id.data;
+      const r=parseInt(hex.slice(0,2),16)/255,gg=parseInt(hex.slice(2,4),16)/255,b=parseInt(hex.slice(4,6),16)/255;
+      let suml=0,cnt=0;
+      for(let i=0;i<px.length;i+=4){ if(px[i+3]>8){ suml+=0.299*px[i]+0.587*px[i+1]+0.114*px[i+2]; cnt++; } }
+      const avgL=cnt?(suml/cnt)/255:0.5;
+      for(let i=0;i<px.length;i+=4){
+        if(px[i+3]===0)continue;
+        const l=(0.299*px[i]+0.587*px[i+1]+0.114*px[i+2])/255;
+        let k=avgL>0.004?l/avgL:1.0;
+        if(k>1)k=1+(k-1)/(1+0.6*(k-1));
+        let rr=r*k,g2=gg*k,bb=b*k;
+        const m=Math.max(rr,g2,bb);
+        if(m>1){rr/=m;g2/=m;bb/=m;}
+        px[i]=rr*255;px[i+1]=g2*255;px[i+2]=bb*255;
+      }
+      g.putImageData(id,0,0);
+      c.toBlob(async bb=>res(new Uint8Array(await bb.arrayBuffer())),"image/png");
+    };
+    im.src=URL.createObjectURL(new Blob([srcBytes]));
+  });
 }
 
-function loadVRM(buf){
-  const dv=new DataView(buf);
-  if(dv.getUint32(0,true)!==0x46546C67){ status.textContent="not a GLB/VRM"; return; }
-  const total=dv.getUint32(8,true);
-  let off=12,jsonStr=null,binOff=0;
-  while(off+8<=total){const cl=dv.getUint32(off,true),ct=dv.getUint32(off+4,true);off+=8;
-    if(ct===0x4E4F534A)jsonStr=new TextDecoder().decode(new Uint8Array(buf,off,cl));
-    else if(ct===0x004E4942)binOff=off; off+=cl;}
-  const json=JSON.parse(jsonStr);
+// ── derive .vrm bytes from originalBuf + params (always from the original) ──
+async function deriveBuf(){
+  const {json,binOff}=glbChunks(doc.originalBuf);
+  const repl={};
+  for(const [i,bytes] of Object.entries(doc.params.texOverride)) repl[i]=bytes;
+  for(const grp of COLOR_GROUPS){
+    const hex=doc.params.colors[grp.key];
+    if(!hex)continue;
+    for(const idx of groupImages(json,grp.test)){
+      const src=repl[idx]!==undefined?repl[idx]:imgBytes(doc.originalBuf,binOff,json,idx);
+      repl[idx]=await recolorBytes(src,hex);
+    }
+  }
+  return repackGLB(doc.originalBuf,j=>{
+    if(doc.params.title!=null){
+      const ext=j.extensions=j.extensions||{};
+      const vrm=ext.VRMC_vrm=ext.VRMC_vrm||{};
+      (vrm.meta=vrm.meta||{}).name=doc.params.title;
+    }
+  },repl);
+}
+
+// edits → re-derive → re-upload geometry → re-apply morph weights (UI untouched)
+let deriving=false,pendingDerive=false;
+async function refresh(){
+  if(deriving){pendingDerive=true;return;}
+  deriving=true;
+  try{
+    const buf=await deriveBuf();
+    uploadModel(buf);
+    reapplyWeights();
+  } finally {
+    deriving=false;
+    if(pendingDerive){pendingDerive=false;refresh();}
+  }
+}
+
+// ── load geometry into wasm (no UI rebuild) ──
+function buildVerts(pos,norm,uv,count,out){
+  for(let i=0;i<count;i++){const o=i*11;
+    out[o]=pos[i*3];out[o+1]=pos[i*3+1];out[o+2]=pos[i*3+2];
+    if(norm){out[o+3]=norm[i*3];out[o+4]=norm[i*3+1];out[o+5]=norm[i*3+2];}else{out[o+3]=0;out[o+4]=1;out[o+5]=0;}
+    out[o+6]=1;out[o+7]=1;out[o+8]=1;
+    if(uv){out[o+9]=uv[i*2];out[o+10]=uv[i*2+1];}else{out[o+9]=0;out[o+10]=0;}
+  }
+}
+function poolWriteF32(arr){
+  const p=Number(inst.exports.pool_alloc(BigInt(arr.length*4)));
+  if(!p){console.warn("pool exhausted");return 0;}
+  new Float32Array(mem.buffer,p,arr.length).set(arr);
+  return p;
+}
+function put(t,C){const p=Number(inst.exports.__alloc(t.byteLength));new C(mem.buffer,p,t.length).set(t);return p;}
+
+function uploadModel(buf){
+  const {json,binOff}=glbChunks(buf);
   inst.exports.reset_prims(); inst.exports.pool_reset();
-  const meshPrims={}, targetNames={};
-  let n=0, nTargets=0;
-  json.meshes&&json.meshes.forEach((mesh,mi)=>{
+  const meshPrims={};
+  let n=0,nT=0;
+  (json.meshes||[]).forEach((mesh,mi)=>{
     meshPrims[mi]=[];
-    mesh.primitives.forEach((prim)=>{
+    mesh.primitives.forEach(prim=>{
       const a=prim.attributes; if(a.POSITION==null||prim.indices==null)return;
       const count=json.accessors[a.POSITION].count;
       const verts=new Float32Array(count*11);
@@ -202,242 +310,192 @@ function loadVRM(buf){
       const vp=poolWriteF32(verts); if(!vp)return;
       const idx=accIdx(buf,binOff,json,prim.indices);
       const ip=put(idx,Uint16Array);
-      const img=matTexBytes(buf,binOff,json,prim.material);
-      let imgp=0,imgl=0; if(img){imgl=img.length;imgp=put(img,Uint8Array);}
-      const sc=shade(json,prim.material), ol=outline(json,prim.material);
-      const pidNew=Number(inst.exports.add_prim(BigInt(vp),BigInt(count),BigInt(ip),BigInt(idx.length),
+      const src=matTexImage(json,prim.material);
+      let imgp=0,imgl=0;
+      if(src!=null){const ib=imgBytes(buf,binOff,json,src);imgl=ib.length;imgp=put(ib,Uint8Array);}
+      const sc=shade(json,prim.material),ol=outline(json,prim.material);
+      const pid=Number(inst.exports.add_prim(BigInt(vp),BigInt(count),BigInt(ip),BigInt(idx.length),
         BigInt(imgp),BigInt(imgl),sc[0],sc[1],sc[2],BigInt(alphaMode(json,prim.material)),ol[0],ol[1],ol[2],ol[3]))-1;
-      meshPrims[mi].push(pidNew); n++;
-      // morph targets (non-sparse POSITION deltas)
-      (prim.targets||[]).forEach((t)=>{
-        if(t.POSITION==null){ inst.exports.add_morph_target(BigInt(pidNew),0n); return; }
-        const acc=json.accessors[t.POSITION];
-        if(acc.sparse){ console.warn("sparse morph target skipped"); inst.exports.add_morph_target(BigInt(pidNew),0n); return; }
-        const deltas=accF32(buf,binOff,json,t.POSITION);
-        const dp=poolWriteF32(deltas);
-        inst.exports.add_morph_target(BigInt(pidNew),BigInt(dp));
-        nTargets++;
+      meshPrims[mi].push(pid);n++;
+      (prim.targets||[]).forEach(t=>{
+        if(t.POSITION==null||json.accessors[t.POSITION].sparse){inst.exports.add_morph_target(BigInt(pid),0n);return;}
+        const dp=poolWriteF32(accF32(buf,binOff,json,t.POSITION));
+        inst.exports.add_morph_target(BigInt(pid),BigInt(dp));nT++;
       });
-      const names=(prim.extras&&prim.extras.targetNames)||(mesh.extras&&mesh.extras.targetNames);
-      if(names && !targetNames[mi]) targetNames[mi]=names;
     });
   });
-  model={json,meshPrims,targetNames,dirty:new Set()};
-  currentBuf=buf;
-  buildPanel();
-  buildTexturePanel(buf,binOff,json);
-  buildColorPanel(json);
-  const meta=json.extensions&&json.extensions.VRMC_vrm&&json.extensions.VRMC_vrm.meta;
-  document.getElementById("metaTitle").value=(meta&&meta.name)||"";
-  status.textContent=`${n} prims, ${nTargets} morph targets (editor v6)`;
-  dropEl.classList.remove("active");
+  doc.meshPrims=meshPrims;
+  status.textContent=`${n} prims, ${nT} morph targets (studio v7)`;
+  return {json,binOff};
 }
 
-// ── texture panel ──
-function buildTexturePanel(buf,binOff,json){
-  const tp=document.getElementById("textures"); tp.innerHTML="";
-  (json.images||[]).forEach((img,i)=>{
-    if(img.bufferView==null)return;
-    const bv=json.bufferViews[img.bufferView];
-    const blob=new Blob([new Uint8Array(buf,binOff+(bv.byteOffset||0),bv.byteLength)],{type:img.mimeType||"image/png"});
-    const el=document.createElement("img");
-    el.src=URL.createObjectURL(blob);
-    el.style.cssText="width:64px;height:64px;object-fit:cover;border:1px solid #3a3a52;border-radius:6px;cursor:pointer;background:#111";
-    el.title=`image ${i}${img.name?" — "+img.name:""} (click to replace)`;
-    el.addEventListener("click",()=>{
-      const fi=document.createElement("input"); fi.type="file"; fi.accept="image/png,image/jpeg";
-      fi.addEventListener("change",async()=>{
-        const f=fi.files[0]; if(!f)return;
-        applyEdit(null,{[i]:new Uint8Array(await f.arrayBuffer())});
-      });
-      fi.click();
-    });
-    tp.appendChild(el);
-  });
-}
-
-// ── semantic color groups (VRoid-style 汎用 color params) ──
-// VRoid exports name materials with standard tokens; group them so one picker
-// recolors hair / eyes / skin / clothes on ANY VRoid-family VRM.
-const COLOR_GROUPS=[
-  {key:"髪",     test:n=>/_HAIR/i.test(n)},
-  {key:"瞳",     test:n=>/EyeIris/i.test(n)},
-  {key:"肌",     test:n=>/_SKIN/i.test(n)},
-  {key:"服",     test:n=>/_CLOTH|Onepiece|Tops|Bottoms/i.test(n)},
-  {key:"靴",     test:n=>/Shoes/i.test(n)},
-];
-function groupImages(json,test){
-  const imgs=new Set();
-  (json.materials||[]).forEach(m=>{
-    if(!test(m.name||""))return;
-    const bct=m.pbrMetallicRoughness&&m.pbrMetallicRoughness.baseColorTexture;
-    if(bct)imgs.add(json.textures[bct.index].source);
-  });
-  return [...imgs];
-}
-// hue/sat replace, luminance preserved (keeps shading detail + alpha)
-function recolorImage(buf,binOff,json,imgIdx,hex){
-  return new Promise(res=>{
-    const bv=json.bufferViews[json.images[imgIdx].bufferView];
-    const blob=new Blob([new Uint8Array(buf,binOff+(bv.byteOffset||0),bv.byteLength)]);
-    const im=new Image();
-    im.onload=()=>{
-      const c=document.createElement("canvas");c.width=im.width;c.height=im.height;
-      const g=c.getContext("2d");g.drawImage(im,0,0);
-      const id=g.getImageData(0,0,c.width,c.height),px=id.data;
-      const r=parseInt(hex.slice(0,2),16)/255,gg=parseInt(hex.slice(2,4),16)/255,b=parseInt(hex.slice(4,6),16)/255;
-      // normalize by the texture's average luminance: a pixel at avg maps to
-      // exactly the target colour; shading detail rides as the ratio l/avgL.
-      // Works on dark sources too (e.g. near-black outfits).
-      let suml=0,cnt=0;
-      for(let i=0;i<px.length;i+=4){ if(px[i+3]>8){ suml+=0.299*px[i]+0.587*px[i+1]+0.114*px[i+2]; cnt++; } }
-      const avgL=cnt? (suml/cnt)/255 : 0.5;
-      for(let i=0;i<px.length;i+=4){
-        if(px[i+3]===0)continue;
-        const l=(0.299*px[i]+0.587*px[i+1]+0.114*px[i+2])/255;
-        let k=avgL>0.004?l/avgL:1.0;
-        if(k>1)k=1+(k-1)/(1+0.6*(k-1));   // soft knee: compress highlights
-        let rr=r*k,gg2=gg*k,bb=b*k;
-        const m=Math.max(rr,gg2,bb);
-        if(m>1){rr/=m;gg2/=m;bb/=m;}       // hue-preserving clip (no white-out)
-        px[i]=rr*255;px[i+1]=gg2*255;px[i+2]=bb*255;
-      }
-      g.putImageData(id,0,0);
-      c.toBlob(async bb=>res(new Uint8Array(await bb.arrayBuffer())),"image/png");
-    };
-    im.src=URL.createObjectURL(blob);
-  });
-}
-async function applyGroupColor(test,hex){
-  // locate bin in currentBuf
-  const dv=new DataView(currentBuf);const total=dv.getUint32(8,true);
-  let off=12,binOff=0;
-  while(off+8<=total){const cl=dv.getUint32(off,true),ct=dv.getUint32(off+4,true);off+=8;
-    if(ct===0x004E4942)binOff=off; off+=cl;}
-  const repl={};
-  for(const idx of groupImages(model.json,test))
-    repl[idx]=await recolorImage(currentBuf,binOff,model.json,idx,hex);
-  if(Object.keys(repl).length)applyEdit(null,repl);
-}
-function buildColorPanel(json){
-  const cp=document.getElementById("colors");cp.innerHTML="";
-  COLOR_GROUPS.forEach(grp=>{
-    if(!groupImages(json,grp.test).length)return;
-    const row=document.createElement("div");row.className="slider";
-    const lab=document.createElement("label");lab.textContent=grp.key;
-    const inp=document.createElement("input");inp.type="color";inp.value="#8a6a52";
-    inp.style.cssText="flex:1;height:24px;background:#26263a;border:1px solid #3a3a52;border-radius:4px";
-    inp.addEventListener("change",()=>applyGroupColor(grp.test,inp.value.slice(1)));
-    row.append(lab,inp);cp.appendChild(row);
-  });
-}
-
-// ── save / meta ──
-document.getElementById("saveVrm").addEventListener("click",()=>{
-  if(!currentBuf)return;
-  const a=document.createElement("a");
-  a.href=URL.createObjectURL(new Blob([currentBuf],{type:"model/gltf-binary"}));
-  const t=document.getElementById("metaTitle").value||"model";
-  a.download=t.replace(/[^\w\-ぁ-んァ-ヶ一-龠]/g,"_")+".vrm";
-  a.click();
-});
-document.getElementById("metaTitle").addEventListener("change",()=>{
-  if(!currentBuf)return;
-  const v=document.getElementById("metaTitle").value;
-  applyEdit(j=>{
-    const ext=j.extensions=j.extensions||{};
-    const vrm=ext.VRMC_vrm=ext.VRMC_vrm||{};
-    (vrm.meta=vrm.meta||{}).name=v;
-  });
-});
-
-// ── expressions / sliders ──
+// ── morph/expression state (survives refresh) ──
 function exprList(){
-  const vrm=model.json.extensions&&model.json.extensions.VRMC_vrm;
+  const vrm=doc.json.extensions&&doc.json.extensions.VRMC_vrm;
   if(!vrm||!vrm.expressions)return [];
   const out=[];
-  for(const [group,map] of Object.entries({preset:vrm.expressions.preset||{}, custom:vrm.expressions.custom||{}}))
+  for(const [g,map] of Object.entries({preset:vrm.expressions.preset||{},custom:vrm.expressions.custom||{}}))
     for(const [name,ex] of Object.entries(map))
-      out.push({name:group==="custom"?"c:"+name:name, binds:ex.morphTargetBinds||[]});
+      out.push({name:g==="custom"?"c:"+name:name,binds:ex.morphTargetBinds||[]});
   return out;
+}
+const dirty=new Set();
+let rafPending=false;
+function scheduleRebuild(){
+  if(rafPending)return; rafPending=true;
+  requestAnimationFrame(()=>{rafPending=false;dirty.forEach(p=>inst.exports.rebuild_prim(BigInt(p)));dirty.clear();});
 }
 function applyBinds(binds,v){
   binds.forEach(b=>{
-    const meshIdx=model.json.nodes[b.node]&&model.json.nodes[b.node].mesh!=null?model.json.nodes[b.node].mesh:b.node;
-    (model.meshPrims[meshIdx]||[]).forEach(pid=>{
+    const mi=doc.json.nodes[b.node]&&doc.json.nodes[b.node].mesh!=null?doc.json.nodes[b.node].mesh:b.node;
+    (doc.meshPrims[mi]||[]).forEach(pid=>{
       inst.exports.set_morph_weight(BigInt(pid),BigInt(b.index),v*(b.weight!=null?b.weight:1));
-      model.dirty.add(pid);
+      dirty.add(pid);
     });
   });
   scheduleRebuild();
 }
-let rafPending=false;
-function scheduleRebuild(){
-  if(rafPending)return; rafPending=true;
-  requestAnimationFrame(()=>{ rafPending=false;
-    model.dirty.forEach(pid=>inst.exports.rebuild_prim(BigInt(pid)));
-    model.dirty.clear();
-  });
+function reapplyWeights(){
+  const list=exprList();
+  for(const [name,v] of Object.entries(doc.ui.expr)){
+    const e=list.find(x=>x.name===name); if(e&&v)applyBinds(e.binds,v);
+  }
+  for(const [key,v] of Object.entries(doc.ui.morph)){
+    if(!v)continue;
+    const [mi,ti]=key.split(":");
+    (doc.meshPrims[mi]||[]).forEach(pid=>{inst.exports.set_morph_weight(BigInt(pid),BigInt(ti),v);dirty.add(pid);});
+  }
+  scheduleRebuild();
 }
-function sliderRow(parent,labelText,oninput){
-  const row=document.createElement("div"); row.className="slider";
-  const lab=document.createElement("label"); lab.textContent=labelText; lab.title=labelText;
-  const inp=document.createElement("input"); inp.type="range"; inp.min=0; inp.max=1; inp.step=0.01; inp.value=0;
-  const val=document.createElement("span"); val.textContent="0.00";
-  inp.addEventListener("input",()=>{ val.textContent=(+inp.value).toFixed(2); oninput(+inp.value); });
-  row.append(lab,inp,val); parent.appendChild(row);
+
+// ── open a NEW document (drop / sample): reset params + build panels ──
+function openDocument(buf){
+  const {json,binOff}=glbChunks(buf);
+  const meta=json.extensions&&json.extensions.VRMC_vrm&&json.extensions.VRMC_vrm.meta;
+  doc={originalBuf:buf,json,binOff,
+       params:{colors:{},texOverride:{},title:(meta&&meta.name)||""},
+       meshPrims:{},targetNames:{},ui:{expr:{},morph:{}}};
+  // collect target names
+  (json.meshes||[]).forEach((mesh,mi)=>{
+    mesh.primitives.forEach(prim=>{
+      const names=(prim.extras&&prim.extras.targetNames)||(mesh.extras&&mesh.extras.targetNames);
+      if(names&&!doc.targetNames[mi])doc.targetNames[mi]=names;
+    });
+  });
+  uploadModel(buf);
+  buildPanels();
+  dropEl.classList.remove("active");
+}
+
+// ── panels (built ONCE per document; edits only update values) ──
+function sliderRow(parent,labelText,onin){
+  const row=document.createElement("div");row.className="slider";
+  const lab=document.createElement("label");lab.textContent=labelText;lab.title=labelText;
+  const inp=document.createElement("input");inp.type="range";inp.min=0;inp.max=1;inp.step=0.01;inp.value=0;
+  const val=document.createElement("span");val.className="val";val.textContent="0.00";
+  inp.addEventListener("input",()=>{val.textContent=(+inp.value).toFixed(2);onin(+inp.value);});
+  row.append(lab,inp,val);parent.appendChild(row);
   return inp;
 }
 const exprInputs={};
-function buildPanel(){
-  const ex=document.getElementById("exprs"); ex.innerHTML="";
+function buildPanels(){
+  // colors
+  const cp=document.getElementById("colors");cp.innerHTML="";
+  COLOR_GROUPS.forEach(grp=>{
+    if(!groupImages(doc.json,grp.test).length)return;
+    const row=document.createElement("div");row.className="crow";
+    const lab=document.createElement("label");lab.textContent=grp.key;
+    const inp=document.createElement("input");inp.type="color";inp.value="#888888";
+    const hex=document.createElement("input");hex.className="hex";hex.value="—";hex.readOnly=true;
+    const clr=document.createElement("button");clr.className="clr";clr.textContent="↺";clr.title="元に戻す";
+    inp.addEventListener("change",()=>{
+      doc.params.colors[grp.key]=inp.value.slice(1);
+      hex.value=inp.value.toUpperCase();
+      refresh();
+    });
+    clr.addEventListener("click",()=>{
+      delete doc.params.colors[grp.key];hex.value="—";refresh();
+    });
+    row.append(lab,inp,hex,clr);cp.appendChild(row);
+  });
+  // textures
+  const tg=document.getElementById("texgrid");tg.innerHTML="";
+  (doc.json.images||[]).forEach((img,i)=>{
+    if(img.bufferView==null)return;
+    const el=document.createElement("img");
+    el.src=URL.createObjectURL(new Blob([imgBytes(doc.originalBuf,doc.binOff,doc.json,i)],{type:img.mimeType||"image/png"}));
+    el.title=`image ${i}${img.name?" — "+img.name:""}`;
+    el.addEventListener("click",()=>{
+      const fi=document.createElement("input");fi.type="file";fi.accept="image/png,image/jpeg";
+      fi.addEventListener("change",async()=>{
+        const f=fi.files[0];if(!f)return;
+        doc.params.texOverride[i]=new Uint8Array(await f.arrayBuffer());
+        el.classList.add("replaced");
+        el.src=URL.createObjectURL(f);
+        refresh();
+      });
+      fi.click();
+    });
+    tg.appendChild(el);
+  });
+  // meta
+  const mt=document.getElementById("metaTitle");
+  mt.value=doc.params.title;
+  mt.onchange=()=>{doc.params.title=mt.value;refresh();};
+  // expressions
+  const ex=document.getElementById("exprs");ex.innerHTML="";
   exprList().forEach(e=>{
     if(!e.binds.length)return;
-    exprInputs[e.name]=sliderRow(ex,e.name,v=>applyBinds(e.binds,v));
+    exprInputs[e.name]=sliderRow(ex,e.name,v=>{doc.ui.expr[e.name]=v;applyBinds(e.binds,v);});
   });
-  if(!ex.children.length) ex.innerHTML='<i style="color:#556">no expressions</i>';
-  const mo=document.getElementById("morphs"); mo.innerHTML="";
-  Object.entries(model.targetNames).forEach(([mi,names])=>{
+  if(!ex.children.length)ex.innerHTML='<i style="color:#556">no expressions</i>';
+  // raw morphs
+  const mo=document.getElementById("morphs");mo.innerHTML="";
+  Object.entries(doc.targetNames).forEach(([mi,names])=>{
     names.forEach((nm,ti)=>{
       sliderRow(mo,nm,v=>{
-        (model.meshPrims[mi]||[]).forEach(pid=>{ inst.exports.set_morph_weight(BigInt(pid),BigInt(ti),v); model.dirty.add(pid); });
+        doc.ui.morph[mi+":"+ti]=v;
+        (doc.meshPrims[mi]||[]).forEach(pid=>{inst.exports.set_morph_weight(BigInt(pid),BigInt(ti),v);dirty.add(pid);});
         scheduleRebuild();
       });
     });
   });
 }
-document.getElementById("resetExpr").addEventListener("click",()=>{
-  document.querySelectorAll('#panel input[type=range]').forEach(i=>{ i.value=0; i.dispatchEvent(new Event("input")); });
+
+// ── save / reset ──
+document.getElementById("saveVrm").addEventListener("click",async()=>{
+  if(!doc)return;
+  const buf=await deriveBuf();
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([buf],{type:"model/gltf-binary"}));
+  a.download=(doc.params.title||"model").replace(/[^\w\-ぁ-んァ-ヶ一-龠]/g,"_")+".vrm";
+  a.click();
+});
+document.getElementById("resetAll").addEventListener("click",()=>{
+  if(!doc)return;
+  doc.params.colors={};doc.params.texOverride={};
+  doc.ui.expr={};doc.ui.morph={};
+  document.querySelectorAll('#tabbody input[type=range]').forEach(i=>{i.value=0;i.nextElementSibling.textContent="0.00";});
+  document.querySelectorAll('#colors .hex').forEach(h=>h.value="—");
+  document.querySelectorAll('#texgrid img').forEach(t=>t.classList.remove("replaced"));
+  refresh();
 });
 
-// ?expr=happy:1,blink:0.5  /  ?yaw=3.14  (headless verification hooks)
+// ── url hooks (headless verification) ──
 function applyUrlParams(){
   const q=new URLSearchParams(location.search);
   const yaw=parseFloat(q.get("yaw")||"0");
-  if(yaw){ inst.exports.on_pointer_down(0,0,0n); inst.exports.on_pointer_move(-yaw/0.01,0); inst.exports.on_pointer_up(0,0,0n); }
+  if(yaw){inst.exports.on_pointer_down(0,0,0n);inst.exports.on_pointer_move(-yaw/0.01,0);inst.exports.on_pointer_up(0,0,0n);}
   const dist=parseFloat(q.get("dist")||"0");
-  if(dist){ inst.exports.on_wheel((dist-3.0)/0.003); }
-  const ty=parseFloat(q.get("ty")||"0"); // camera target height tweak via drag-up
-  if(ty){ inst.exports.on_pointer_down(0,0,0n); inst.exports.on_pointer_move(0,-ty/0.01); inst.exports.on_pointer_up(0,0,0n); }
-  // ?tint=髪:ff66aa — semantic group recolor (headless test)
+  if(dist)inst.exports.on_wheel((dist-3.0)/0.003);
   const tint=q.get("tint");
-  if(tint&&model){ const [gk,hex]=tint.split(":");
-    const grp=COLOR_GROUPS.find(g=>g.key===gk);
-    if(grp)applyGroupColor(grp.test,hex);
-  }
-  // ?recolor=15:ff3355 — replace image N with a solid-color PNG (headless test)
-  const rc=q.get("recolor");
-  if(rc&&model){
-    const [idx,hex]=rc.split(":");
-    const c=document.createElement("canvas"); c.width=c.height=64;
-    const g=c.getContext("2d"); g.fillStyle="#"+hex; g.fillRect(0,0,64,64);
-    c.toBlob(async b=>{ applyEdit(null,{[idx]:new Uint8Array(await b.arrayBuffer())}); },"image/png");
-  }
+  if(tint&&doc){const [gk,hex]=tint.split(":");doc.params.colors[gk]=hex;refresh();}
   const expr=q.get("expr");
-  if(expr&&model){ const list=exprList();
-    expr.split(",").forEach(pair=>{ const [nm,v]=pair.split(":");
-      const e=list.find(x=>x.name===nm); if(e) applyBinds(e.binds,parseFloat(v||"1"));
-      if(exprInputs[nm]){ exprInputs[nm].value=parseFloat(v||"1"); }
+  if(expr&&doc){const list=exprList();
+    expr.split(",").forEach(pair=>{const [nm,v]=pair.split(":");
+      const e=list.find(x=>x.name===nm);
+      if(e){doc.ui.expr[nm]=parseFloat(v||"1");applyBinds(e.binds,parseFloat(v||"1"));}
+      if(exprInputs[nm])exprInputs[nm].value=parseFloat(v||"1");
     });
   }
 }
@@ -451,9 +509,9 @@ function wirePointer(){
 }
 document.body.addEventListener("dragover",e=>{e.preventDefault();dropEl.classList.add("active");});
 document.body.addEventListener("dragleave",e=>{if(e.target===document.body)dropEl.classList.remove("active");});
-document.body.addEventListener("drop",async e=>{e.preventDefault();const f=e.dataTransfer.files[0];if(f)loadVRM(await f.arrayBuffer());});
+document.body.addEventListener("drop",async e=>{e.preventDefault();const f=e.dataTransfer.files[0];if(f)openDocument(await f.arrayBuffer());});
 document.getElementById("label").addEventListener("click",()=>fileEl.click());
-fileEl.addEventListener("change",async()=>{const f=fileEl.files[0];if(f)loadVRM(await f.arrayBuffer());});
+fileEl.addEventListener("change",async()=>{const f=fileEl.files[0];if(f)openDocument(await f.arrayBuffer());});
 </script>
 </body>
 </html>
