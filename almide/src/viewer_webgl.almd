@@ -91,6 +91,8 @@ let SPRING_BLOB = 96
 let COLLIDER_BLOB = 32
 // [n_joints][joints_ptr][n_colliders][colliders_ptr][last_time:f32]
 let g_spring = bytes.new(20)
+// live physics tuning: [gravity_add:f32][stiffness_mul:f32]
+let g_spring_tune = bytes.new(8)
 // extra per-node quat layer applied after pose: q_base x q_pose x q_spring
 let g_spring_rot = bytes.new(8192)
 
@@ -431,6 +433,7 @@ effect fn main() -> Unit = {
   bytes.set_f32_le(g_cam, 8, 3.0)
   let _ = set_light_dir(0.35, 0.7, 0.5)
   let _ = set_bg(0.08, 0.085, 0.11)
+  let _ = set_spring_tune(0.0, 1.0)
 
   render_frame(0.0)
   on_pointer_down(0.0, 0.0, 0)
@@ -1126,6 +1129,12 @@ pub fn set_light_dir(x: Float, y: Float, z: Float) -> Int = {
   0
 }
 
+pub fn set_spring_tune(gravity_add: Float, stiffness_mul: Float) -> Int = {
+  bytes.set_f32_le(g_spring_tune, 0, gravity_add)
+  bytes.set_f32_le(g_spring_tune, 4, stiffness_mul)
+  0
+}
+
 pub fn set_bg(r: Float, g: Float, b: Float) -> Int = {
   bytes.set_f32_le(g_view, 12, r)
   bytes.set_f32_le(g_view, 16, g)
@@ -1251,8 +1260,8 @@ pub fn spring_tick(dt: Float) -> Int = {
             bytes.set_f32_le(g_pool, jo + 72, rz)
             bytes.set_i32_le(g_pool, jo + 88, 1)
           } else {}
-          let stiff = bytes.read_f32_le(g_pool, jo + 8)
-          let gpow = bytes.read_f32_le(g_pool, jo + 12)
+          let stiff = bytes.read_f32_le(g_pool, jo + 8) * bytes.read_f32_le(g_spring_tune, 4)
+          let gpow = bytes.read_f32_le(g_pool, jo + 12) + bytes.read_f32_le(g_spring_tune, 0)
           let gdx = bytes.read_f32_le(g_pool, jo + 16)
           let gdy = bytes.read_f32_le(g_pool, jo + 20)
           let gdz = bytes.read_f32_le(g_pool, jo + 24)
