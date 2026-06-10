@@ -348,3 +348,151 @@ function transplantParts(recBuf,donBuf,category){
   for(const part of parts){ou.set(part,p);p+=part.length;}
   return out;
 }
+
+
+// ── extraction: carve a category out of a VRM into a standalone PART file ──
+// A part file is itself a minimal valid VRM: full skeleton + humanoid map
+// (so transplantParts can role-map it later) + ONLY this category's prims,
+// materials, textures, springs. Everything unreferenced is pruned, so a hair
+// part is a few MB instead of the donor's 20.
+function stripCategories(buf,categories,keepInverse){
+  const G=pGlb(buf);
+  const rj=JSON.parse(JSON.stringify(G.json));
+  const bin=new Uint8Array(buf,G.binOff);
+  const tests=categories.map(c=>PART_CATEGORIES[c].test);
+  const inCat=mi=>tests.some(t=>t(((rj.materials||[])[mi]||{}).name||""));
+
+  rj.meshes.forEach(m=>{m.primitives=m.primitives.filter(p=>keepInverse?inCat(p.material):!inCat(p.material));});
+  const removedMesh=new Set();
+  rj.meshes.forEach((m,i)=>{if(!m.primitives.length)removedMesh.add(i);});
+  const meshRemap=new Map();let mk=0;
+  rj.meshes.forEach((m,i)=>{if(!removedMesh.has(i))meshRemap.set(i,mk++);});
+  rj.meshes=rj.meshes.filter((_,i)=>!removedMesh.has(i));
+  rj.nodes.forEach(nd=>{
+    if(nd.mesh!=null){ if(removedMesh.has(nd.mesh)){delete nd.mesh;delete nd.skin;} else nd.mesh=meshRemap.get(nd.mesh); }
+  });
+
+  // springs: keep the ones whose joints look like they belong to what we kept
+  const sb=(rj.extensions||{}).VRMC_springBone;
+  if(sb&&sb.springs){
+    const want=k=>({hair:/hair|J_Sec_Hair/i,cloth:/skirt|coat|cloth|sode|sleeve/i,face:null})[k];
+    const regs=categories.map(want).filter(Boolean);
+    sb.springs=sb.springs.filter(s=>{
+      const names=(s.joints||[]).map(jt=>(rj.nodes[jt.node]||{}).name||"").concat([s.name||""]);
+      const hit=regs.some(r=>names.some(n=>r.test(n)));
+      return keepInverse?hit:!hit;
+    });
+  }
+  // expressions: drop binds to nodes without a mesh anymore
+  const ex=(((rj.extensions||{}).VRMC_vrm)||{}).expressions;
+  if(ex)for(const grp of ["preset","custom"])
+    for(const e of Object.values(ex[grp]||{}))
+      if(e.morphTargetBinds)e.morphTargetBinds=e.morphTargetBinds.filter(b=>rj.nodes[b.node]&&rj.nodes[b.node].mesh!=null);
+
+  // ── reference closure → prune accessors / bufferViews / materials / textures / images / skins ──
+  const usedAcc=new Set(),usedMat=new Set(),usedSkin=new Set();
+  rj.meshes.forEach(m=>m.primitives.forEach(p=>{
+    Object.values(p.attributes||{}).forEach(a=>usedAcc.add(a));
+    if(p.indices!=null)usedAcc.add(p.indices);
+    (p.targets||[]).forEach(t=>Object.values(t).forEach(a=>usedAcc.add(a)));
+    if(p.material!=null)usedMat.add(p.material);
+  }));
+  rj.nodes.forEach(nd=>{if(nd.skin!=null)usedSkin.add(nd.skin);});
+  const skinRemap=new Map();
+  rj.skins=(rj.skins||[]).filter((sk,i)=>{
+    if(!usedSkin.has(i))return false;
+    skinRemap.set(i,skinRemap.size);
+    if(sk.inverseBindMatrices!=null)usedAcc.add(sk.inverseBindMatrices);
+    return true;});
+  rj.nodes.forEach(nd=>{if(nd.skin!=null)nd.skin=skinRemap.get(nd.skin);});
+
+  const usedTex=new Set();
+  const scanTex=o=>{if(!o||typeof o!=="object")return;
+    for(const k of Object.keys(o)){
+      if(o[k]&&typeof o[k]==="object"){
+        if(typeof o[k].index==="number"&&/texture/i.test(k))usedTex.add(o[k].index);
+        else scanTex(o[k]);
+      }}};
+  const matRemap=new Map();
+  rj.materials=(rj.materials||[]).filter((m,i)=>{
+    if(!usedMat.has(i))return false;
+    matRemap.set(i,matRemap.size);scanTex(m);return true;});
+  rj.meshes.forEach(m=>m.primitives.forEach(p=>{if(p.material!=null)p.material=matRemap.get(p.material);}));
+
+  const usedImg=new Set();const texRemap=new Map();
+  rj.textures=(rj.textures||[]).filter((t,i)=>{
+    if(!usedTex.has(i))return false;
+    texRemap.set(i,texRemap.size);if(t.source!=null)usedImg.add(t.source);return true;});
+  const fixTex=o=>{if(!o||typeof o!=="object")return;
+    for(const k of Object.keys(o)){
+      if(o[k]&&typeof o[k]==="object"){
+        if(typeof o[k].index==="number"&&/texture/i.test(k))o[k].index=texRemap.get(o[k].index);
+        else fixTex(o[k]);
+      }}};
+  rj.materials.forEach(fixTex);
+  const imgRemap=new Map();
+  rj.images=(rj.images||[]).filter((im,i)=>{
+    if(!usedImg.has(i))return false;imgRemap.set(i,imgRemap.size);return true;});
+  rj.textures.forEach(t=>{if(t.source!=null)t.source=imgRemap.get(t.source);});
+
+  // VRM1 meta thumbnail references a texture — drop it (pruned)
+  const vrmExt=(rj.extensions||{}).VRMC_vrm;
+  if(vrmExt&&vrmExt.meta)delete vrmExt.meta.thumbnailImage;
+  // VRM1 firstPerson/lookAt may reference removed meshes — drop for parts
+  if(keepInverse&&vrmExt){delete vrmExt.firstPerson;delete vrmExt.lookAt;}
+
+  // accessors: tight-copy kept ones; rebuild bufferViews fresh
+  const accRemap=new Map();
+  const newAcc=[];const newBv=[];const srcs=[];
+  const G2={json:G.json,binOff:G.binOff,buf};
+  [...usedAcc].sort((a,b)=>a-b).forEach(ai=>{
+    const a=G.json.accessors[ai];
+    const bytes=pAccBytes(G2,ai);
+    newBv.push({buffer:0,byteOffset:0,byteLength:bytes.length});
+    srcs.push(bytes);
+    const na={bufferView:newBv.length-1,componentType:a.componentType,count:a.count,type:a.type};
+    if(a.normalized)na.normalized=true;
+    if(a.min)na.min=a.min;if(a.max)na.max=a.max;
+    accRemap.set(ai,newAcc.length);newAcc.push(na);
+  });
+  rj.meshes.forEach(m=>m.primitives.forEach(p=>{
+    for(const k of Object.keys(p.attributes))p.attributes[k]=accRemap.get(p.attributes[k]);
+    if(p.indices!=null)p.indices=accRemap.get(p.indices);
+    (p.targets||[]).forEach(t=>{for(const k of Object.keys(t))t[k]=accRemap.get(t[k]);});
+  }));
+  rj.skins.forEach(sk=>{if(sk.inverseBindMatrices!=null)sk.inverseBindMatrices=accRemap.get(sk.inverseBindMatrices);});
+  // images get their own bufferViews
+  rj.images.forEach(im=>{
+    const bv=G.json.bufferViews[im.bufferView];
+    const bytes=bin.subarray(bv.byteOffset||0,(bv.byteOffset||0)+bv.byteLength);
+    newBv.push({buffer:0,byteOffset:0,byteLength:bytes.length});
+    srcs.push(bytes);
+    im.bufferView=newBv.length-1;
+  });
+  rj.accessors=newAcc;
+  rj.bufferViews=newBv;
+
+  // assemble
+  const parts=[];let cur=0;
+  rj.bufferViews.forEach((bv,i)=>{
+    const src=srcs[i];
+    bv.byteOffset=cur;bv.byteLength=src.length;
+    parts.push(src);cur+=src.length;
+    const pad=(4-(cur%4))%4;if(pad){parts.push(new Uint8Array(pad));cur+=pad;}
+  });
+  rj.buffers=[{byteLength:cur}];
+  let jb=new TextEncoder().encode(JSON.stringify(rj));
+  const jpad=(4-(jb.length%4))%4;
+  if(jpad){const j2=new Uint8Array(jb.length+jpad);j2.set(jb);j2.fill(0x20,jb.length);jb=j2;}
+  const totalLen=12+8+jb.length+8+cur;
+  const out=new ArrayBuffer(totalLen);const odv=new DataView(out);const ou=new Uint8Array(out);
+  odv.setUint32(0,0x46546C67,true);odv.setUint32(4,2,true);odv.setUint32(8,totalLen,true);
+  odv.setUint32(12,jb.length,true);odv.setUint32(16,0x4E4F534A,true);ou.set(jb,20);
+  let p=20+jb.length;
+  odv.setUint32(p,cur,true);odv.setUint32(p+4,0x004E4942,true);p+=8;
+  for(const part of parts){ou.set(part,p);p+=part.length;}
+  return out;
+}
+// part file = only this category; base body = everything except all categories
+function extractPart(buf,category){return stripCategories(buf,[category],true);}
+function buildBase(buf){return stripCategories(buf,["hair","face","cloth"],false);}
