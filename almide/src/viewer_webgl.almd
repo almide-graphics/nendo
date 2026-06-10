@@ -73,6 +73,11 @@ let g_n_skins = bytes.new(4)
 // per prim: [sid:i32][jw_ptr:i32]  (jw: per vertex u16x4 joints + f32x4 weights = 24B)
 let g_prim_skin = bytes.new(4096)
 
+// glTF original node index → topo slot (-1 = none); filled by the Almide loader
+let g_slotmap = bytes.new(2048)
+// mesh index → skin sid (-1 = unskinned); filled by the Almide loader
+let g_meshskin = bytes.new(256)
+
 // column-major mat4 multiply on g_pool offsets: D = A * B (D must not alias)
 fn m4_mul(d: Int, a: Int, b: Int) -> Unit = {
   var c = 0
@@ -274,6 +279,20 @@ fn acc_comp_size(gltf: json.Value, idx: Int) -> Int = {
   let ct = option.unwrap_or(json.get_int(arr_at(gltf, "accessors", idx), "componentType"), 5126)
   if ct == 5120 or ct == 5121 then 1 else if ct == 5122 or ct == 5123 then 2 else 4
 }
+// numeric element readers for parsed json arrays (ints and floats both appear)
+fn lf(xs: List[json.Value], k: Int, d: Float) -> Float =
+  match list.get(xs, k) {
+    none => d,
+    some(v) => match json.as_float(v) {
+      some(f) => f,
+      none => match json.as_int(v) { some(i) => int.to_float(i), none => d },
+    },
+  }
+fn li(xs: List[json.Value], k: Int, d: Int) -> Int =
+  match list.get(xs, k) { none => d, some(v) => option.unwrap_or(json.as_int(v), d) }
+fn ji_at(parent: json.Value, key: String, k: Int, d: Int) -> Int =
+  li(option.unwrap_or(json.get_array(parent, key), []), k, d)
+
 fn acc_stride(gltf: json.Value, idx: Int, components: Int) -> Int = {
   let acc = arr_at(gltf, "accessors", idx)
   let bv = arr_at(gltf, "bufferViews", option.unwrap_or(json.get_int(acc, "bufferView"), 0))
@@ -369,6 +388,7 @@ effect fn main() -> Unit = {
   let _ = set_node_rotation(0 - 1, 0.0, 0.0, 0.0, 1.0)
   let _ = recompute_skin()
   let _ = get_prim_work(0 - 1)
+  let _ = get_node_slot(0 - 1)
 }
 
 pub fn set_aspect(a: Float) -> Int = {
@@ -483,6 +503,121 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
       ii = ii + 1
     }
 
+    // ── Skeleton (topo order) + skins — parsed entirely in Almide ──
+    let base2 = bytes.data_ptr(g_pool)
+    let n_nodes = arr_len(gltf, "nodes")
+    var sm0 = 0
+    while sm0 < MAX_NODES { bytes.set_i32_le(g_slotmap, sm0 * 4, 0 - 1); sm0 = sm0 + 1 }
+    var ms0 = 0
+    while ms0 < 64 { bytes.set_i32_le(g_meshskin, ms0 * 4, 0 - 1); ms0 = ms0 + 1 }
+    if n_nodes > 0 and n_nodes <= MAX_NODES then {
+      let par = pool_alloc(n_nodes * 4)
+      let queue = pool_alloc(n_nodes * 4)
+      var i2 = 0
+      while i2 < n_nodes { bytes.set_i32_le(g_pool, par - base2 + i2 * 4, 0 - 1); i2 = i2 + 1 }
+      var i3 = 0
+      while i3 < n_nodes {
+        let nd = arr_at(gltf, "nodes", i3)
+        let nch = list.len(option.unwrap_or(json.get_array(nd, "children"), []))
+        var k2 = 0
+        while k2 < nch {
+          let ch = ji_at(nd, "children", k2, 0 - 1)
+          if ch >= 0 and ch < n_nodes then { bytes.set_i32_le(g_pool, par - base2 + ch * 4, i3) } else {}
+          k2 = k2 + 1
+        }
+        i3 = i3 + 1
+      }
+      var qh = 0
+      var qt = 0
+      var r2 = 0
+      while r2 < n_nodes {
+        if bytes.read_i32_le(g_pool, par - base2 + r2 * 4) < 0 then {
+          bytes.set_i32_le(g_pool, queue - base2 + qt * 4, r2)
+          qt = qt + 1
+        } else {}
+        r2 = r2 + 1
+      }
+      while qh < qt {
+        let cur = bytes.read_i32_le(g_pool, queue - base2 + qh * 4)
+        bytes.set_i32_le(g_slotmap, cur * 4, qh)
+        let nd2 = arr_at(gltf, "nodes", cur)
+        let nch2 = list.len(option.unwrap_or(json.get_array(nd2, "children"), []))
+        var k3 = 0
+        while k3 < nch2 {
+          let ch2 = ji_at(nd2, "children", k3, 0 - 1)
+          if ch2 >= 0 and ch2 < n_nodes and qt < n_nodes then {
+            bytes.set_i32_le(g_pool, queue - base2 + qt * 4, ch2)
+            qt = qt + 1
+          } else {}
+          k3 = k3 + 1
+        }
+        qh = qh + 1
+      }
+      let nblob = pool_alloc(n_nodes * NODE_BLOB)
+      var s2 = 0
+      while s2 < n_nodes {
+        let orig = bytes.read_i32_le(g_pool, queue - base2 + s2 * 4)
+        let nd3 = arr_at(gltf, "nodes", orig)
+        let o2 = nblob - base2 + s2 * NODE_BLOB
+        let p2 = bytes.read_i32_le(g_pool, par - base2 + orig * 4)
+        bytes.set_i32_le(g_pool, o2, if p2 < 0 then 0 - 1 else bytes.read_i32_le(g_slotmap, p2 * 4))
+        let tr = option.unwrap_or(json.get_array(nd3, "translation"), [])
+        let ro = option.unwrap_or(json.get_array(nd3, "rotation"), [])
+        let sc = option.unwrap_or(json.get_array(nd3, "scale"), [])
+        bytes.set_f32_le(g_pool, o2 + 4, lf(tr, 0, 0.0))
+        bytes.set_f32_le(g_pool, o2 + 8, lf(tr, 1, 0.0))
+        bytes.set_f32_le(g_pool, o2 + 12, lf(tr, 2, 0.0))
+        bytes.set_f32_le(g_pool, o2 + 16, lf(ro, 0, 0.0))
+        bytes.set_f32_le(g_pool, o2 + 20, lf(ro, 1, 0.0))
+        bytes.set_f32_le(g_pool, o2 + 24, lf(ro, 2, 0.0))
+        bytes.set_f32_le(g_pool, o2 + 28, lf(ro, 3, 1.0))
+        bytes.set_f32_le(g_pool, o2 + 32, lf(sc, 0, 1.0))
+        bytes.set_f32_le(g_pool, o2 + 36, lf(sc, 1, 1.0))
+        bytes.set_f32_le(g_pool, o2 + 40, lf(sc, 2, 1.0))
+        s2 = s2 + 1
+      }
+      let _ = set_skeleton(n_nodes, nblob)
+      let n_sk = int.min(arr_len(gltf, "skins"), MAX_SKINS)
+      var si = 0
+      while si < n_sk {
+        let sk = arr_at(gltf, "skins", si)
+        let nj = list.len(option.unwrap_or(json.get_array(sk, "joints"), []))
+        let jp = pool_alloc(nj * 4)
+        var jk = 0
+        while jk < nj {
+          let on = ji_at(sk, "joints", jk, 0)
+          let slot = if on >= 0 and on < MAX_NODES then bytes.read_i32_le(g_slotmap, on * 4) else 0
+          bytes.set_i32_le(g_pool, jp - base2 + jk * 4, int.max(slot, 0))
+          jk = jk + 1
+        }
+        let ibm_i = option.unwrap_or(json.get_int(sk, "inverseBindMatrices"), 0 - 1)
+        let mp = pool_alloc(nj * 64)
+        if ibm_i >= 0 then {
+          bytes.copy_from(g_pool, data, mp - base2, bin_off + acc_base(gltf, ibm_i), nj * 64)
+        } else {
+          var idn = 0
+          while idn < nj {
+            let mo = mp - base2 + idn * 64
+            bytes.set_f32_le(g_pool, mo, 1.0)
+            bytes.set_f32_le(g_pool, mo + 20, 1.0)
+            bytes.set_f32_le(g_pool, mo + 40, 1.0)
+            bytes.set_f32_le(g_pool, mo + 60, 1.0)
+            idn = idn + 1
+          }
+        }
+        let _ = add_skin(nj, jp, mp)
+        si = si + 1
+      }
+      var ni4 = 0
+      while ni4 < n_nodes {
+        let nd4 = arr_at(gltf, "nodes", ni4)
+        let m4 = option.unwrap_or(json.get_int(nd4, "mesh"), 0 - 1)
+        let s4 = option.unwrap_or(json.get_int(nd4, "skin"), 0 - 1)
+        if m4 >= 0 and m4 < 64 and s4 >= 0 and s4 < n_sk then { bytes.set_i32_le(g_meshskin, m4 * 4, s4) } else {}
+        ni4 = ni4 + 1
+      }
+    } else {}
+
     let n_meshes = arr_len(gltf, "meshes")
     var pid = 0
     var mi = 0
@@ -501,6 +636,9 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
         let vc = bytes.len(verts) / STRIDE
         let ic = bytes.len(idxb) / 2
         if pid < MAX_PRIMS and ic > 0 and vc > 0 then {
+          // base verts live in the pool so morphs/skinning can rebuild
+          let vp = pool_alloc(vc * STRIDE)
+          if vp != 0 then { bytes.copy_from(g_pool, verts, vp - base2, 0, vc * STRIDE) } else {}
           let vbo = webgl.create_buffer()
           webgl.bind_buffer(webgl.array_buffer(), vbo)
           webgl.buffer_data_f32_ptr(webgl.array_buffer(), bytes.data_ptr(verts), vc * STRIDE, webgl.static_draw())
@@ -513,6 +651,11 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
           var sr = 0.55
           var sg = 0.50
           var sb = 0.62
+          var amode = 0
+          var ow = 0.0
+          var ocr = 0.0
+          var ocg = 0.0
+          var ocb = 0.0
           if mat_i >= 0 then {
             let material = arr_at(gltf, "materials", mat_i)
             match json.get(material, "pbrMetallicRoughness") {
@@ -529,14 +672,33 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
               },
               none => {},
             }
-            let is_mtoon = match json.get(material, "extensions") {
-              some(ext) => option.is_some(json.get(ext, "VRMC_materials_mtoon")), none => is_vrm0,
+            let am = option.unwrap_or(json.get_string(material, "alphaMode"), "OPAQUE")
+            amode = if am == "BLEND" then 2 else if am == "MASK" then 1 else 0
+            match json.get(material, "extensions") {
+              some(ext) => match json.get(ext, "VRMC_materials_mtoon") {
+                some(mt) => {
+                  sr = shade_c(gltf, mat_i, 0)
+                  sg = shade_c(gltf, mat_i, 1)
+                  sb = shade_c(gltf, mat_i, 2)
+                  let om = option.unwrap_or(json.get_string(mt, "outlineWidthMode"), "none")
+                  if om != "none" then {
+                    ow = option.unwrap_or(json.get_float(mt, "outlineWidthFactor"), 0.0)
+                    let oc = option.unwrap_or(json.get_array(mt, "outlineColorFactor"), [])
+                    ocr = lf(oc, 0, 0.0)
+                    ocg = lf(oc, 1, 0.0)
+                    ocb = lf(oc, 2, 0.0)
+                  } else {}
+                },
+                none => {
+                  if is_vrm0 then {
+                    sr = shade_c(gltf, mat_i, 0)
+                    sg = shade_c(gltf, mat_i, 1)
+                    sb = shade_c(gltf, mat_i, 2)
+                  } else {}
+                },
+              },
+              none => {},
             }
-            if is_mtoon then {
-              sr = shade_c(gltf, mat_i, 0)
-              sg = shade_c(gltf, mat_i, 1)
-              sb = shade_c(gltf, mat_i, 2)
-            } else {}
           } else {}
 
           let po = pid * PRIM_STRIDE
@@ -547,6 +709,81 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
           bytes.set_f32_le(g_prim_meta, po + 16, sr)
           bytes.set_f32_le(g_prim_meta, po + 20, sg)
           bytes.set_f32_le(g_prim_meta, po + 24, sb)
+          bytes.set_i32_le(g_prim_meta, po + 28, amode)
+          bytes.set_f32_le(g_prim_meta, po + 32, ow)
+          bytes.set_f32_le(g_prim_meta, po + 36, ocr)
+          bytes.set_f32_le(g_prim_meta, po + 40, ocg)
+          bytes.set_f32_le(g_prim_meta, po + 44, ocb)
+          bytes.set_i32_le(g_prim_meta, po + 48, vp)
+          bytes.set_i32_le(g_prim_meta, po + 52, vc)
+          bytes.set_i32_le(g_prim_meta, po + 56, 0)
+          bytes.set_i32_le(g_prim_meta, po + 60, 0)
+          bytes.set_i32_le(g_prim_skin, pid * 8, 0 - 1)
+          bytes.set_i32_le(g_prim_skin, pid * 8 + 4, 0)
+
+          // morph targets (POSITION deltas → pool)
+          let n_tg = arr_len(prim, "targets")
+          var tgi = 0
+          while tgi < n_tg and tgi < MAX_TARGETS {
+            let tg = arr_at(prim, "targets", tgi)
+            let tp_i = option.unwrap_or(json.get_int(tg, "POSITION"), 0 - 1)
+            var dp = 0
+            if tp_i >= 0 then {
+              let tb = acc_base(gltf, tp_i)
+              let tstr = acc_stride(gltf, tp_i, 3)
+              dp = pool_alloc(vc * 12)
+              if dp != 0 then {
+                if tstr == 12 then { bytes.copy_from(g_pool, data, dp - base2, bin_off + tb, vc * 12) }
+                else {
+                  var dv = 0
+                  while dv < vc {
+                    bytes.copy_from(g_pool, data, dp - base2 + dv * 12, bin_off + tb + dv * tstr, 12)
+                    dv = dv + 1
+                  }
+                }
+              } else {}
+            } else {}
+            let _ = add_morph_target(pid, dp)
+            tgi = tgi + 1
+          }
+
+          // skinning binding (JOINTS_0 / WEIGHTS_0 → jw blob)
+          let msid = if mi < 64 then bytes.read_i32_le(g_meshskin, mi * 4) else 0 - 1
+          let attrs2 = option.unwrap_or(json.get(prim, "attributes"), json.null())
+          let j_i = option.unwrap_or(json.get_int(attrs2, "JOINTS_0"), 0 - 1)
+          let w_i = option.unwrap_or(json.get_int(attrs2, "WEIGHTS_0"), 0 - 1)
+          if msid >= 0 and j_i >= 0 and w_i >= 0 then {
+            let jb = acc_base(gltf, j_i)
+            let jcs = acc_comp_size(gltf, j_i)
+            let jstr = acc_stride(gltf, j_i, 4)
+            let wb = acc_base(gltf, w_i)
+            let wcs = acc_comp_size(gltf, w_i)
+            let wstr = acc_stride(gltf, w_i, 4)
+            let jw = pool_alloc(vc * 24)
+            if jw != 0 then {
+              var v5 = 0
+              while v5 < vc {
+                let jo = jw - base2 + v5 * 24
+                var c5 = 0
+                while c5 < 4 {
+                  let jsrc = bin_off + jb + v5 * jstr + c5 * jcs
+                  let jval = if jcs == 1 then bytes.read_u8(data, jsrc)
+                    else if jcs == 2 then bytes.read_u16_le(data, jsrc)
+                    else bytes.read_u32_le(data, jsrc)
+                  bytes.set_u16_le(g_pool, jo + c5 * 2, jval)
+                  let wsrc = bin_off + wb + v5 * wstr + c5 * wcs
+                  let wval = if wcs == 4 then bytes.read_f32_le(data, wsrc)
+                    else if wcs == 2 then int.to_float(bytes.read_u16_le(data, wsrc)) / 65535.0
+                    else int.to_float(bytes.read_u8(data, wsrc)) / 255.0
+                  bytes.set_f32_le(g_pool, jo + 8 + c5 * 4, wval)
+                  c5 = c5 + 1
+                }
+                v5 = v5 + 1
+              }
+              let _ = set_prim_skin(pid, msid, jw)
+            } else {}
+          } else {}
+
           pid = pid + 1
         } else {}
         pi = pi + 1
@@ -559,6 +796,10 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
 }
 
 pub fn get_prim_count() -> Int = bytes.read_i32_le(g_n_prims, 0)
+
+// glTF original node index → skeleton slot (for host UI bone params)
+pub fn get_node_slot(orig: Int) -> Int =
+  if orig >= 0 and orig < MAX_NODES then bytes.read_i32_le(g_slotmap, orig * 4) else 0 - 1
 
 // debug: absolute work-buffer ptr of a prim (0 if none yet)
 pub fn get_prim_work(pid: Int) -> Int =
