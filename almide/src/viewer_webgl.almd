@@ -49,6 +49,75 @@ let g_pool_used = bytes.new(4)
 let MAX_TARGETS = 64
 let g_mt_ptr = bytes.new(131072)   // i32 absolute delta ptr (xyz f32 per vertex)
 let g_mt_w = bytes.new(131072)     // f32 weight
+
+// ── Skinning ──
+// Skeleton nodes arrive topologically sorted (parent before child) as a pool
+// blob: per node 44B = [parent:i32][T:3f32][R quat:4f32][S:3f32]. World mats,
+// skin palettes and the compose scratch live in the pool too. Bone params are
+// per-node overrides: scale multiplies S, offset adds to T — that is the whole
+// "body parameter" mechanism (VRoid-style 身長/頭/肩幅 ride on these).
+let MAX_NODES = 512
+let NODE_BLOB = 44
+let g_skel = bytes.new(16)          // [n_nodes][nodes_ptr][world_ptr][tmp_ptr]
+let g_node_scale = bytes.new(6144)  // 512 x 3 f32 (default 1)
+let g_node_off = bytes.new(6144)    // 512 x 3 f32 (default 0)
+
+let MAX_SKINS = 16
+// per skin: [n_joints:i32][joints_ptr:i32][ibm_ptr:i32][palette_ptr:i32]
+let g_skins = bytes.new(256)
+let g_n_skins = bytes.new(4)
+// per prim: [sid:i32][jw_ptr:i32]  (jw: per vertex u16x4 joints + f32x4 weights = 24B)
+let g_prim_skin = bytes.new(4096)
+
+// column-major mat4 multiply on g_pool offsets: D = A * B (D must not alias)
+fn m4_mul(d: Int, a: Int, b: Int) -> Unit = {
+  var c = 0
+  while c < 4 {
+    var r = 0
+    while r < 4 {
+      let v = bytes.read_f32_le(g_pool, a + r * 4) * bytes.read_f32_le(g_pool, b + c * 16)
+        + bytes.read_f32_le(g_pool, a + 16 + r * 4) * bytes.read_f32_le(g_pool, b + c * 16 + 4)
+        + bytes.read_f32_le(g_pool, a + 32 + r * 4) * bytes.read_f32_le(g_pool, b + c * 16 + 8)
+        + bytes.read_f32_le(g_pool, a + 48 + r * 4) * bytes.read_f32_le(g_pool, b + c * 16 + 12)
+      bytes.set_f32_le(g_pool, d + c * 16 + r * 4, v)
+      r = r + 1
+    }
+    c = c + 1
+  }
+}
+
+// compose node-local matrix (T+off) * R(quat) * (S*scale) into pool offset d
+fn compose_local(d: Int, slot: Int) -> Unit = {
+  let base = bytes.data_ptr(g_pool)
+  let nb = bytes.read_i32_le(g_skel, 4) - base + slot * NODE_BLOB
+  let tx = bytes.read_f32_le(g_pool, nb + 4) + bytes.read_f32_le(g_node_off, slot * 12)
+  let ty = bytes.read_f32_le(g_pool, nb + 8) + bytes.read_f32_le(g_node_off, slot * 12 + 4)
+  let tz = bytes.read_f32_le(g_pool, nb + 12) + bytes.read_f32_le(g_node_off, slot * 12 + 8)
+  let qx = bytes.read_f32_le(g_pool, nb + 16)
+  let qy = bytes.read_f32_le(g_pool, nb + 20)
+  let qz = bytes.read_f32_le(g_pool, nb + 24)
+  let qw = bytes.read_f32_le(g_pool, nb + 28)
+  let sx = bytes.read_f32_le(g_pool, nb + 32) * bytes.read_f32_le(g_node_scale, slot * 12)
+  let sy = bytes.read_f32_le(g_pool, nb + 36) * bytes.read_f32_le(g_node_scale, slot * 12 + 4)
+  let sz = bytes.read_f32_le(g_pool, nb + 40) * bytes.read_f32_le(g_node_scale, slot * 12 + 8)
+  // rotation matrix from quat, columns scaled
+  bytes.set_f32_le(g_pool, d, (1.0 - 2.0 * (qy * qy + qz * qz)) * sx)
+  bytes.set_f32_le(g_pool, d + 4, (2.0 * (qx * qy + qz * qw)) * sx)
+  bytes.set_f32_le(g_pool, d + 8, (2.0 * (qx * qz - qy * qw)) * sx)
+  bytes.set_f32_le(g_pool, d + 12, 0.0)
+  bytes.set_f32_le(g_pool, d + 16, (2.0 * (qx * qy - qz * qw)) * sy)
+  bytes.set_f32_le(g_pool, d + 20, (1.0 - 2.0 * (qx * qx + qz * qz)) * sy)
+  bytes.set_f32_le(g_pool, d + 24, (2.0 * (qy * qz + qx * qw)) * sy)
+  bytes.set_f32_le(g_pool, d + 28, 0.0)
+  bytes.set_f32_le(g_pool, d + 32, (2.0 * (qx * qz + qy * qw)) * sz)
+  bytes.set_f32_le(g_pool, d + 36, (2.0 * (qy * qz - qx * qw)) * sz)
+  bytes.set_f32_le(g_pool, d + 40, (1.0 - 2.0 * (qx * qx + qy * qy)) * sz)
+  bytes.set_f32_le(g_pool, d + 44, 0.0)
+  bytes.set_f32_le(g_pool, d + 48, tx)
+  bytes.set_f32_le(g_pool, d + 52, ty)
+  bytes.set_f32_le(g_pool, d + 56, tz)
+  bytes.set_f32_le(g_pool, d + 60, 1.0)
+}
 let MAX_IMAGES = 256
 let g_img_tex = bytes.new(1024)
 let g_cam = bytes.new(12)   // yaw:f32, pitch:f32, dist:f32
@@ -277,6 +346,12 @@ effect fn main() -> Unit = {
   let _ = add_morph_target(0 - 1, 0)
   let _ = set_morph_weight(0 - 1, 0, 0.0)
   let _ = rebuild_prim(0 - 1)
+  let _ = set_skeleton(0, 0)
+  let _ = add_skin(0, 0, 0)
+  let _ = set_prim_skin(0 - 1, 0 - 1, 0)
+  let _ = set_node_scale(0 - 1, 1.0, 1.0, 1.0)
+  let _ = set_node_offset(0 - 1, 0.0, 0.0, 0.0)
+  let _ = recompute_skin()
 }
 
 pub fn set_aspect(a: Float) -> Int = {
@@ -468,6 +543,113 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
 
 pub fn get_prim_count() -> Int = bytes.read_i32_le(g_n_prims, 0)
 
+// ── Skinning API ──
+
+pub fn set_skeleton(n: Int, nodes_ptr: Int) -> Int = {
+  if n <= 0 or n > MAX_NODES then 0
+  else {
+    bytes.set_i32_le(g_skel, 0, n)
+    bytes.set_i32_le(g_skel, 4, nodes_ptr)
+    bytes.set_i32_le(g_skel, 8, pool_alloc(n * 64))
+    bytes.set_i32_le(g_skel, 12, pool_alloc(64))
+    var i = 0
+    while i < n {
+      bytes.set_f32_le(g_node_scale, i * 12, 1.0)
+      bytes.set_f32_le(g_node_scale, i * 12 + 4, 1.0)
+      bytes.set_f32_le(g_node_scale, i * 12 + 8, 1.0)
+      bytes.set_f32_le(g_node_off, i * 12, 0.0)
+      bytes.set_f32_le(g_node_off, i * 12 + 4, 0.0)
+      bytes.set_f32_le(g_node_off, i * 12 + 8, 0.0)
+      i = i + 1
+    }
+    bytes.set_i32_le(g_n_skins, 0, 0)
+    n
+  }
+}
+
+pub fn add_skin(n_joints: Int, joints_ptr: Int, ibm_ptr: Int) -> Int = {
+  let sid = bytes.read_i32_le(g_n_skins, 0)
+  if sid >= MAX_SKINS or n_joints <= 0 then 0 - 1
+  else {
+    let so = sid * 16
+    bytes.set_i32_le(g_skins, so, n_joints)
+    bytes.set_i32_le(g_skins, so + 4, joints_ptr)
+    bytes.set_i32_le(g_skins, so + 8, ibm_ptr)
+    bytes.set_i32_le(g_skins, so + 12, pool_alloc(n_joints * 64))
+    bytes.set_i32_le(g_n_skins, 0, sid + 1)
+    sid
+  }
+}
+
+pub fn set_prim_skin(pid: Int, sid: Int, jw_ptr: Int) -> Int = {
+  if pid >= 0 and pid < MAX_PRIMS then {
+    bytes.set_i32_le(g_prim_skin, pid * 8, sid)
+    bytes.set_i32_le(g_prim_skin, pid * 8 + 4, jw_ptr)
+    0
+  } else 0
+}
+
+pub fn set_node_scale(slot: Int, sx: Float, sy: Float, sz: Float) -> Int = {
+  if slot >= 0 and slot < MAX_NODES then {
+    bytes.set_f32_le(g_node_scale, slot * 12, sx)
+    bytes.set_f32_le(g_node_scale, slot * 12 + 4, sy)
+    bytes.set_f32_le(g_node_scale, slot * 12 + 8, sz)
+    0
+  } else 0
+}
+
+pub fn set_node_offset(slot: Int, dx: Float, dy: Float, dz: Float) -> Int = {
+  if slot >= 0 and slot < MAX_NODES then {
+    bytes.set_f32_le(g_node_off, slot * 12, dx)
+    bytes.set_f32_le(g_node_off, slot * 12 + 4, dy)
+    bytes.set_f32_le(g_node_off, slot * 12 + 8, dz)
+    0
+  } else 0
+}
+
+// Recompute world matrices + skin palettes, then re-blend every prim.
+pub fn recompute_skin() -> Int = {
+  let n = bytes.read_i32_le(g_skel, 0)
+  if n == 0 then 0
+  else {
+    let base = bytes.data_ptr(g_pool)
+    let nodes = bytes.read_i32_le(g_skel, 4) - base
+    let world = bytes.read_i32_le(g_skel, 8) - base
+    let tmp = bytes.read_i32_le(g_skel, 12) - base
+    var i = 0
+    while i < n {
+      compose_local(tmp, i)
+      let parent = bytes.read_i32_le(g_pool, nodes + i * NODE_BLOB)
+      if parent < 0 then { bytes.copy_from(g_pool, g_pool, world + i * 64, tmp, 64) }
+      else { m4_mul(world + i * 64, world + parent * 64, tmp) }
+      i = i + 1
+    }
+    let n_skins = bytes.read_i32_le(g_n_skins, 0)
+    var s = 0
+    while s < n_skins {
+      let so = s * 16
+      let nj = bytes.read_i32_le(g_skins, so)
+      let joints = bytes.read_i32_le(g_skins, so + 4) - base
+      let ibm = bytes.read_i32_le(g_skins, so + 8) - base
+      let pal = bytes.read_i32_le(g_skins, so + 12) - base
+      var j = 0
+      while j < nj {
+        let slot = bytes.read_i32_le(g_pool, joints + j * 4)
+        m4_mul(pal + j * 64, world + slot * 64, ibm + j * 64)
+        j = j + 1
+      }
+      s = s + 1
+    }
+    var p = 0
+    let np = bytes.read_i32_le(g_n_prims, 0)
+    while p < np {
+      let _ = rebuild_prim(p)
+      p = p + 1
+    }
+    0
+  }
+}
+
 // ── JS-driven primitive upload (interim path; bypasses Almide json.parse #470) ──
 // The host parses the glTF and hands ready geometry; Almide still owns ALL the
 // GL: program/uniforms/passes here + the buffer/texture creation below.
@@ -514,6 +696,8 @@ pub fn add_prim(vptr: Int, vcount: Int, iptr: Int, icount: Int,
     bytes.set_i32_le(g_prim_meta, po + 52, vcount)
     bytes.set_i32_le(g_prim_meta, po + 56, 0)
     bytes.set_i32_le(g_prim_meta, po + 60, 0)
+    bytes.set_i32_le(g_prim_skin, pid * 8, 0 - 1)
+    bytes.set_i32_le(g_prim_skin, pid * 8 + 4, 0)
     bytes.set_i32_le(g_n_prims, 0, pid + 1)
     pid + 1
   }
@@ -565,8 +749,51 @@ pub fn set_morph_weight(pid: Int, ti: Int, w: Float) -> Int = {
   } else 0
 }
 
-// Re-blend prim `pid` (base + sum of weighted deltas) and re-upload its VBO.
-// Positions are the first 12 bytes of each 44-byte vertex.
+// Skin-blend positions+normals of `vc` vertices in-place at work_off.
+// jw blob: per vertex [u16 x4 joint indices][f32 x4 weights] = 24B.
+fn skin_blend(work_off: Int, vc: Int, sid: Int, jw_off: Int) -> Unit = {
+  let pal = bytes.read_i32_le(g_skins, sid * 16 + 12) - bytes.data_ptr(g_pool)
+  var vi = 0
+  while vi < vc {
+    let wo = work_off + vi * STRIDE
+    let jo = jw_off + vi * 24
+    let px = bytes.read_f32_le(g_pool, wo)
+    let py = bytes.read_f32_le(g_pool, wo + 4)
+    let pz = bytes.read_f32_le(g_pool, wo + 8)
+    let nx = bytes.read_f32_le(g_pool, wo + 12)
+    let ny = bytes.read_f32_le(g_pool, wo + 16)
+    let nz = bytes.read_f32_le(g_pool, wo + 20)
+    var ox = 0.0
+    var oy = 0.0
+    var oz = 0.0
+    var mx = 0.0
+    var my = 0.0
+    var mz = 0.0
+    var k = 0
+    while k < 4 {
+      let w = bytes.read_f32_le(g_pool, jo + 8 + k * 4)
+      if w > 0.00001 then {
+        let m = pal + bytes.read_u16_le(g_pool, jo + k * 2) * 64
+        ox = ox + w * (bytes.read_f32_le(g_pool, m) * px + bytes.read_f32_le(g_pool, m + 16) * py + bytes.read_f32_le(g_pool, m + 32) * pz + bytes.read_f32_le(g_pool, m + 48))
+        oy = oy + w * (bytes.read_f32_le(g_pool, m + 4) * px + bytes.read_f32_le(g_pool, m + 20) * py + bytes.read_f32_le(g_pool, m + 36) * pz + bytes.read_f32_le(g_pool, m + 52))
+        oz = oz + w * (bytes.read_f32_le(g_pool, m + 8) * px + bytes.read_f32_le(g_pool, m + 24) * py + bytes.read_f32_le(g_pool, m + 40) * pz + bytes.read_f32_le(g_pool, m + 56))
+        mx = mx + w * (bytes.read_f32_le(g_pool, m) * nx + bytes.read_f32_le(g_pool, m + 16) * ny + bytes.read_f32_le(g_pool, m + 32) * nz)
+        my = my + w * (bytes.read_f32_le(g_pool, m + 4) * nx + bytes.read_f32_le(g_pool, m + 20) * ny + bytes.read_f32_le(g_pool, m + 36) * nz)
+        mz = mz + w * (bytes.read_f32_le(g_pool, m + 8) * nx + bytes.read_f32_le(g_pool, m + 24) * ny + bytes.read_f32_le(g_pool, m + 40) * nz)
+      } else {}
+      k = k + 1
+    }
+    bytes.set_f32_le(g_pool, wo, ox)
+    bytes.set_f32_le(g_pool, wo + 4, oy)
+    bytes.set_f32_le(g_pool, wo + 8, oz)
+    bytes.set_f32_le(g_pool, wo + 12, mx)
+    bytes.set_f32_le(g_pool, wo + 16, my)
+    bytes.set_f32_le(g_pool, wo + 20, mz)
+    vi = vi + 1
+  }
+}
+
+// Re-blend prim `pid`: base verts → morph deltas → skinning → re-upload VBO.
 pub fn rebuild_prim(pid: Int) -> Int = {
   if pid < 0 or pid >= bytes.read_i32_le(g_n_prims, 0) then 0
   else {
@@ -574,7 +801,10 @@ pub fn rebuild_prim(pid: Int) -> Int = {
     let vptr = bytes.read_i32_le(g_prim_meta, po + 48)
     let vc = bytes.read_i32_le(g_prim_meta, po + 52)
     let cnt = bytes.read_i32_le(g_prim_meta, po + 60)
-    if vptr == 0 or vc == 0 or cnt == 0 then 0
+    let sid = bytes.read_i32_le(g_prim_skin, pid * 8)
+    let jw = bytes.read_i32_le(g_prim_skin, pid * 8 + 4)
+    let skinned = sid >= 0 and jw != 0 and bytes.read_i32_le(g_skel, 0) > 0
+    if vptr == 0 or vc == 0 or (cnt == 0 and skinned == false) then 0
     else {
       var work = bytes.read_i32_le(g_prim_meta, po + 56)
       if work == 0 then {
@@ -605,6 +835,7 @@ pub fn rebuild_prim(pid: Int) -> Int = {
           } else {}
           ti = ti + 1
         }
+        if skinned then skin_blend(dst_off, vc, sid, jw - base) else {}
         webgl.bind_buffer(webgl.array_buffer(), bytes.read_i32_le(g_prim_meta, po))
         webgl.buffer_data_f32_ptr(webgl.array_buffer(), work, vc * STRIDE, webgl.dynamic_draw())
         0

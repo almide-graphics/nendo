@@ -51,6 +51,7 @@
   <div id="panel">
     <div id="tabs">
       <button data-tab="look" class="active">ルック</button>
+      <button data-tab="body">体型</button>
       <button data-tab="expr">表情</button>
       <button data-tab="detail">詳細</button>
     </div>
@@ -63,6 +64,7 @@
         <h2>メタ</h2>
         <div class="crow"><label>Title</label><input id="metaTitle" type="text"></div>
       </div>
+      <div class="tab" id="tab-body"><h2>パラメータ</h2><div id="bodyparams"><i style="color:#556">no skeleton</i></div></div>
       <div class="tab" id="tab-expr"><div id="exprs"></div></div>
       <div class="tab" id="tab-detail"><div id="morphs"></div></div>
     </div>
@@ -258,6 +260,28 @@ async function deriveBuf(){
       const vrm=ext.VRMC_vrm=ext.VRMC_vrm||{};
       (vrm.meta=vrm.meta||{}).name=doc.params.title;
     }
+    // body params → node TRS, so the SAVED .vrm keeps the shape in any viewer
+    if(doc.skel&&doc.ui.body){
+      const hm=doc.skel.humanoid||{};
+      for(const [k,v] of Object.entries(doc.ui.body)){
+        if(!v)continue;
+        const p=BODY_PARAMS.find(x=>x.key===k); if(!p)continue;
+        const used=p.kind==="offsetX"
+          ?(hm.leftShoulder!=null?["leftShoulder","rightShoulder"]:["leftUpperArm","rightUpperArm"])
+          :p.bones;
+        used.forEach(bn=>{
+          const node=hm[bn]; if(node==null)return;
+          const nd=j.nodes[node];
+          if(p.kind==="scale"){
+            const s=1+p.amt*v, sc=nd.scale||[1,1,1];
+            nd.scale=[sc[0]*s,sc[1]*s,sc[2]*s];
+          }else{
+            const t=nd.translation||[0,0,0], sign=t[0]>=0?1:-1;
+            nd.translation=[t[0]+p.amt*v*sign,t[1],t[2]];
+          }
+        });
+      }
+    }
   },repl);
 }
 
@@ -291,11 +315,115 @@ function poolWriteF32(arr){
   new Float32Array(mem.buffer,p,arr.length).set(arr);
   return p;
 }
+
+// ── skeleton / skins upload (re-pushed on every uploadModel; pool is reset) ──
+function accVec4Joints(buf,binOff,json,idx){
+  const a=json.accessors[idx],bv=json.bufferViews[a.bufferView];
+  const base=binOff+(bv.byteOffset||0)+(a.byteOffset||0),ct=a.componentType;
+  const cs=compSize(ct),st=bv.byteStride||(4*cs);
+  const d=new DataView(buf),o=new Uint16Array(a.count*4);
+  for(let i=0;i<a.count;i++)for(let c=0;c<4;c++){
+    const p=base+i*st+c*cs;
+    o[i*4+c]=ct===5123?d.getUint16(p,true):ct===5125?d.getUint32(p,true):d.getUint8(p);
+  }
+  return o;
+}
+function accVec4Weights(buf,binOff,json,idx){
+  const a=json.accessors[idx],bv=json.bufferViews[a.bufferView];
+  const base=binOff+(bv.byteOffset||0)+(a.byteOffset||0),ct=a.componentType;
+  const cs=compSize(ct),st=bv.byteStride||(4*cs);
+  const d=new DataView(buf),o=new Float32Array(a.count*4);
+  for(let i=0;i<a.count;i++)for(let c=0;c<4;c++){
+    const p=base+i*st+c*cs;
+    o[i*4+c]=ct===5126?d.getFloat32(p,true):ct===5123?d.getUint16(p,true)/65535:d.getUint8(p)/255;
+  }
+  return o;
+}
+function uploadSkeleton(buf,binOff,json){
+  if(!json.nodes||!json.skins||!json.skins.length)return null;
+  // topo order (parents before children)
+  const parent=new Array(json.nodes.length).fill(-1);
+  json.nodes.forEach((nd,i)=>(nd.children||[]).forEach(c=>parent[c]=i));
+  const order=[];const slotOf=new Array(json.nodes.length).fill(-1);
+  const roots=json.nodes.map((_,i)=>i).filter(i=>parent[i]<0);
+  const stack=[...roots];
+  while(stack.length){const i=stack.shift();slotOf[i]=order.length;order.push(i);(json.nodes[i].children||[]).forEach(c=>stack.push(c));}
+  // nodes blob
+  const nb=Number(inst.exports.pool_alloc(BigInt(order.length*44)));
+  if(!nb)return null;
+  const dv=new DataView(mem.buffer);
+  order.forEach((ni,slot)=>{
+    const nd=json.nodes[ni],o=nb+slot*44;
+    dv.setInt32(o,parent[ni]<0?-1:slotOf[parent[ni]],true);
+    const t=nd.translation||[0,0,0],r=nd.rotation||[0,0,0,1],s=nd.scale||[1,1,1];
+    [t[0],t[1],t[2],r[0],r[1],r[2],r[3],s[0],s[1],s[2]].forEach((v,k)=>dv.setFloat32(o+4+k*4,v,true));
+  });
+  inst.exports.set_skeleton(BigInt(order.length),BigInt(nb));
+  // skins
+  const sidOf=[];
+  json.skins.forEach(sk=>{
+    const jp=Number(inst.exports.pool_alloc(BigInt(sk.joints.length*4)));
+    const jdv=new DataView(mem.buffer);
+    sk.joints.forEach((ni,k)=>jdv.setInt32(jp+k*4,slotOf[ni],true));
+    const ibm=accF32(buf,binOff,json,sk.inverseBindMatrices);
+    const mp=poolWriteF32(ibm);
+    sidOf.push(Number(inst.exports.add_skin(BigInt(sk.joints.length),BigInt(jp),BigInt(mp))));
+  });
+  return {slotOf,sidOf,parent};
+}
+
+// ── humanoid body params (generic across VRMs via standard bone names) ──
+function humanoidMap(json){
+  const ext=json.extensions||{};
+  const out={};
+  if(ext.VRMC_vrm&&ext.VRMC_vrm.humanoid){
+    for(const [name,b] of Object.entries(ext.VRMC_vrm.humanoid.humanBones||{}))out[name]=b.node;
+  }else if(ext.VRM&&ext.VRM.humanoid){
+    (ext.VRM.humanoid.humanBones||[]).forEach(b=>out[b.bone]=b.node);
+  }
+  return out;
+}
+const BODY_PARAMS=[
+  {key:"身長",      bones:["hips"],                        kind:"scale", amt:0.15},
+  {key:"頭の大きさ", bones:["head"],                        kind:"scale", amt:0.25},
+  {key:"肩幅",      bones:["leftShoulder","rightShoulder","leftUpperArm","rightUpperArm"], kind:"offsetX", amt:0.045},
+  {key:"腕の長さ",   bones:["leftUpperArm","rightUpperArm"], kind:"scale", amt:0.15},
+  {key:"脚の長さ",   bones:["leftUpperLeg","rightUpperLeg"], kind:"scale", amt:0.15},
+];
+function applyBodyParam(p,v){
+  if(!doc.skel)return;
+  const hm=doc.skel.humanoid;
+  const used=p.kind==="offsetX"
+    ? (hm.leftShoulder!=null?["leftShoulder","rightShoulder"]:["leftUpperArm","rightUpperArm"])
+    : p.bones;
+  used.forEach(bn=>{
+    const node=hm[bn]; if(node==null)return;
+    const slot=doc.skel.slotOf[node]; if(slot<0)return;
+    if(p.kind==="scale"){
+      const s=1+p.amt*v;
+      inst.exports.set_node_scale(BigInt(slot),s,s,s);
+    }else{
+      const tx=(doc.json.nodes[node].translation||[0,0,0])[0];
+      const sign=tx>=0?1:-1;
+      inst.exports.set_node_offset(BigInt(slot),p.amt*v*sign,0,0);
+    }
+  });
+}
+let skinRaf=false;
+function scheduleSkin(){
+  if(skinRaf)return; skinRaf=true;
+  requestAnimationFrame(()=>{skinRaf=false;inst.exports.recompute_skin();});
+}
 function put(t,C){const p=Number(inst.exports.__alloc(t.byteLength));new C(mem.buffer,p,t.length).set(t);return p;}
 
 function uploadModel(buf){
   const {json,binOff}=glbChunks(buf);
   inst.exports.reset_prims(); inst.exports.pool_reset();
+  // skeleton first (its pool blobs must exist before set_prim_skin)
+  doc.skel=uploadSkeleton(buf,binOff,json);
+  if(doc.skel)doc.skel.humanoid=humanoidMap(json);
+  const meshSkin={};
+  (json.nodes||[]).forEach(nd=>{if(nd.mesh!=null&&nd.skin!=null)meshSkin[nd.mesh]=nd.skin;});
   const meshPrims={};
   let n=0,nT=0;
   (json.meshes||[]).forEach((mesh,mi)=>{
@@ -322,10 +450,24 @@ function uploadModel(buf){
         const dp=poolWriteF32(accF32(buf,binOff,json,t.POSITION));
         inst.exports.add_morph_target(BigInt(pid),BigInt(dp));nT++;
       });
+      // skin binding
+      if(doc.skel&&meshSkin[mi]!=null&&a.JOINTS_0!=null&&a.WEIGHTS_0!=null){
+        const J=accVec4Joints(buf,binOff,json,a.JOINTS_0);
+        const W=accVec4Weights(buf,binOff,json,a.WEIGHTS_0);
+        const jw=Number(inst.exports.pool_alloc(BigInt(count*24)));
+        if(jw){
+          const dv2=new DataView(mem.buffer);
+          for(let i=0;i<count;i++){
+            for(let c=0;c<4;c++)dv2.setUint16(jw+i*24+c*2,J[i*4+c],true);
+            for(let c=0;c<4;c++)dv2.setFloat32(jw+i*24+8+c*4,W[i*4+c],true);
+          }
+          inst.exports.set_prim_skin(BigInt(pid),BigInt(doc.skel.sidOf[meshSkin[mi]]),BigInt(jw));
+        }
+      }
     });
   });
   doc.meshPrims=meshPrims;
-  status.textContent=`${n} prims, ${nT} morph targets (studio v7)`;
+  status.textContent=`${n} prims, ${nT} morph targets${doc.skel?", skinned":""} (studio v8)`;
   return {json,binOff};
 }
 
@@ -366,6 +508,15 @@ function reapplyWeights(){
     (doc.meshPrims[mi]||[]).forEach(pid=>{inst.exports.set_morph_weight(BigInt(pid),BigInt(ti),v);dirty.add(pid);});
   }
   scheduleRebuild();
+  if(doc.skel){
+    let any=false;
+    for(const [k,v] of Object.entries(doc.ui.body||{})){
+      if(!v)continue;
+      const p=BODY_PARAMS.find(x=>x.key===k);
+      if(p){applyBodyParam(p,v);any=true;}
+    }
+    if(any)inst.exports.recompute_skin();
+  }
 }
 
 // ── open a NEW document (drop / sample): reset params + build panels ──
@@ -374,7 +525,7 @@ function openDocument(buf){
   const meta=json.extensions&&json.extensions.VRMC_vrm&&json.extensions.VRMC_vrm.meta;
   doc={originalBuf:buf,json,binOff,
        params:{colors:{},texOverride:{},title:(meta&&meta.name)||""},
-       meshPrims:{},targetNames:{},ui:{expr:{},morph:{}}};
+       meshPrims:{},targetNames:{},skel:null,ui:{expr:{},morph:{},body:{}}};
   // collect target names
   (json.meshes||[]).forEach((mesh,mi)=>{
     mesh.primitives.forEach(prim=>{
@@ -388,10 +539,10 @@ function openDocument(buf){
 }
 
 // ── panels (built ONCE per document; edits only update values) ──
-function sliderRow(parent,labelText,onin){
+function sliderRow(parent,labelText,onin,min){
   const row=document.createElement("div");row.className="slider";
   const lab=document.createElement("label");lab.textContent=labelText;lab.title=labelText;
-  const inp=document.createElement("input");inp.type="range";inp.min=0;inp.max=1;inp.step=0.01;inp.value=0;
+  const inp=document.createElement("input");inp.type="range";inp.min=min||0;inp.max=1;inp.step=0.01;inp.value=0;
   const val=document.createElement("span");val.className="val";val.textContent="0.00";
   inp.addEventListener("input",()=>{val.textContent=(+inp.value).toFixed(2);onin(+inp.value);});
   row.append(lab,inp,val);parent.appendChild(row);
@@ -442,6 +593,15 @@ function buildPanels(){
   const mt=document.getElementById("metaTitle");
   mt.value=doc.params.title;
   mt.onchange=()=>{doc.params.title=mt.value;refresh();};
+  // body params
+  const bp=document.getElementById("bodyparams");bp.innerHTML="";
+  if(doc.skel&&Object.keys(doc.skel.humanoid||{}).length){
+    BODY_PARAMS.forEach(p=>{
+      if(!p.bones.some(b=>doc.skel.humanoid[b]!=null))return;
+      sliderRow(bp,p.key,v=>{doc.ui.body[p.key]=v;applyBodyParam(p,v);scheduleSkin();},-1);
+    });
+  }
+  if(!bp.children.length)bp.innerHTML='<i style="color:#556">no skeleton / humanoid</i>';
   // expressions
   const ex=document.getElementById("exprs");ex.innerHTML="";
   exprList().forEach(e=>{
@@ -490,6 +650,15 @@ function applyUrlParams(){
   if(dist)inst.exports.on_wheel((dist-3.0)/0.003);
   const tint=q.get("tint");
   if(tint&&doc){const [gk,hex]=tint.split(":");doc.params.colors[gk]=hex;refresh();}
+  const body=q.get("body");
+  if(body&&doc&&doc.skel){
+    body.split(",").forEach(pair=>{
+      const [k,v]=pair.split(":");
+      const p=BODY_PARAMS.find(x=>x.key===k);
+      if(p){doc.ui.body[k]=parseFloat(v||"1");applyBodyParam(p,parseFloat(v||"1"));}
+    });
+    inst.exports.recompute_skin();
+  }
   const expr=q.get("expr");
   if(expr&&doc){const list=exprList();
     expr.split(",").forEach(pair=>{const [nm,v]=pair.split(":");
