@@ -78,6 +78,18 @@ let g_slotmap = bytes.new(2048)
 // mesh index → skin sid (-1 = unskinned); filled by the Almide loader
 let g_meshskin = bytes.new(256)
 
+// ── Spring bones (VRMC_springBone, Verlet — faithful to three-vrm) ──
+// per sim joint 96B in pool:
+//   [bone_slot:i32][child_slot:i32][stiff:f32][gpow:f32][gdir:3xf32][drag:f32]
+//   [hitR:f32][axis_local:3xf32][curTail:3xf32][prevTail:3xf32][init:i32][pad]
+let SPRING_BLOB = 96
+// per collider 32B: [node_slot:i32][offset:3xf32][radius:f32][pad x3]
+let COLLIDER_BLOB = 32
+// [n_joints][joints_ptr][n_colliders][colliders_ptr][last_time:f32]
+let g_spring = bytes.new(20)
+// extra per-node quat layer applied after pose: q_base x q_pose x q_spring
+let g_spring_rot = bytes.new(8192)
+
 // column-major mat4 multiply on g_pool offsets: D = A * B (D must not alias)
 fn m4_mul(d: Int, a: Int, b: Int) -> Unit = {
   var c = 0
@@ -111,10 +123,19 @@ fn compose_local(d: Int, slot: Int) -> Unit = {
   let py = bytes.read_f32_le(g_node_rot, slot * 16 + 4)
   let pz = bytes.read_f32_le(g_node_rot, slot * 16 + 8)
   let pw = bytes.read_f32_le(g_node_rot, slot * 16 + 12)
-  let qw = bw * pw - bx * px - by * py - bz * pz
-  let qx = bw * px + bx * pw + by * pz - bz * py
-  let qy = bw * py - bx * pz + by * pw + bz * px
-  let qz = bw * pz + bx * py - by * px + bz * pw
+  let mw = bw * pw - bx * px - by * py - bz * pz
+  let mx = bw * px + bx * pw + by * pz - bz * py
+  let my = bw * py - bx * pz + by * pw + bz * px
+  let mz = bw * pz + bx * py - by * px + bz * pw
+  // spring layer: q = (q_base x q_pose) x q_spring
+  let sx2 = bytes.read_f32_le(g_spring_rot, slot * 16)
+  let sy2 = bytes.read_f32_le(g_spring_rot, slot * 16 + 4)
+  let sz2 = bytes.read_f32_le(g_spring_rot, slot * 16 + 8)
+  let sw2 = bytes.read_f32_le(g_spring_rot, slot * 16 + 12)
+  let qw = mw * sw2 - mx * sx2 - my * sy2 - mz * sz2
+  let qx = mw * sx2 + mx * sw2 + my * sz2 - mz * sy2
+  let qy = mw * sy2 - mx * sz2 + my * sw2 + mz * sx2
+  let qz = mw * sz2 + mx * sy2 - my * sx2 + mz * sw2
   let sx = bytes.read_f32_le(g_pool, nb + 32) * bytes.read_f32_le(g_node_scale, slot * 12)
   let sy = bytes.read_f32_le(g_pool, nb + 36) * bytes.read_f32_le(g_node_scale, slot * 12 + 4)
   let sz = bytes.read_f32_le(g_pool, nb + 40) * bytes.read_f32_le(g_node_scale, slot * 12 + 8)
@@ -292,6 +313,12 @@ fn li(xs: List[json.Value], k: Int, d: Int) -> Int =
   match list.get(xs, k) { none => d, some(v) => option.unwrap_or(json.as_int(v), d) }
 fn ji_at(parent: json.Value, key: String, k: Int, d: Int) -> Int =
   li(option.unwrap_or(json.get_array(parent, key), []), k, d)
+// object field as float, accepting ints ("stiffness": 1)
+fn jnumf(v: json.Value, key: String, d: Float) -> Float =
+  match json.get_float(v, key) {
+    some(f) => f,
+    none => match json.get_int(v, key) { some(i) => int.to_float(i), none => d },
+  }
 
 fn acc_stride(gltf: json.Value, idx: Int, components: Int) -> Int = {
   let acc = arr_at(gltf, "accessors", idx)
@@ -389,6 +416,8 @@ effect fn main() -> Unit = {
   let _ = recompute_skin()
   let _ = get_prim_work(0 - 1)
   let _ = get_node_slot(0 - 1)
+  let _ = recompute_world()
+  let _ = spring_tick(0.0)
 }
 
 pub fn set_aspect(a: Float) -> Int = {
@@ -616,6 +645,81 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
         if m4 >= 0 and m4 < 64 and s4 >= 0 and s4 < n_sk then { bytes.set_i32_le(g_meshskin, m4 * 4, s4) } else {}
         ni4 = ni4 + 1
       }
+
+      // VRMC_springBone → sim joints (consecutive pairs) + sphere colliders
+      match json.get(gltf, "extensions") {
+        some(ext2) => match json.get(ext2, "VRMC_springBone") {
+          some(sb) => {
+            let cols = option.unwrap_or(json.get_array(sb, "colliders"), [])
+            let nc2 = int.min(list.len(cols), 64)
+            let cb2 = pool_alloc(int.max(nc2, 1) * COLLIDER_BLOB)
+            var c_used = 0
+            var c2 = 0
+            while c2 < nc2 {
+              let col = list.get_or(cols, c2, json.null())
+              let cn = option.unwrap_or(json.get_int(col, "node"), 0 - 1)
+              match json.get(col, "shape") {
+                some(sh) => match json.get(sh, "sphere") {
+                  some(sp) => {
+                    let off2 = option.unwrap_or(json.get_array(sp, "offset"), [])
+                    let co2 = cb2 - base2 + c_used * COLLIDER_BLOB
+                    let cslot = if cn >= 0 and cn < MAX_NODES then bytes.read_i32_le(g_slotmap, cn * 4) else 0 - 1
+                    bytes.set_i32_le(g_pool, co2, cslot)
+                    bytes.set_f32_le(g_pool, co2 + 4, lf(off2, 0, 0.0))
+                    bytes.set_f32_le(g_pool, co2 + 8, lf(off2, 1, 0.0))
+                    bytes.set_f32_le(g_pool, co2 + 12, lf(off2, 2, 0.0))
+                    bytes.set_f32_le(g_pool, co2 + 16, jnumf(sp, "radius", 0.0))
+                    c_used = c_used + 1
+                  },
+                  none => {},
+                },
+                none => {},
+              }
+              c2 = c2 + 1
+            }
+            bytes.set_i32_le(g_spring, 8, c_used)
+            bytes.set_i32_le(g_spring, 12, cb2)
+            let sps = option.unwrap_or(json.get_array(sb, "springs"), [])
+            let nsp = list.len(sps)
+            let jb2 = pool_alloc(256 * SPRING_BLOB)
+            var used = 0
+            var s5 = 0
+            while s5 < nsp {
+              let sp2 = list.get_or(sps, s5, json.null())
+              let jl = option.unwrap_or(json.get_array(sp2, "joints"), [])
+              let njl = list.len(jl)
+              var k5 = 0
+              while k5 + 1 < njl and used < 256 {
+                let j0 = list.get_or(jl, k5, json.null())
+                let j1 = list.get_or(jl, k5 + 1, json.null())
+                let bn = option.unwrap_or(json.get_int(j0, "node"), 0 - 1)
+                let cn3 = option.unwrap_or(json.get_int(j1, "node"), 0 - 1)
+                if bn >= 0 and bn < MAX_NODES and cn3 >= 0 and cn3 < MAX_NODES then {
+                  let jo2 = jb2 - base2 + used * SPRING_BLOB
+                  bytes.set_i32_le(g_pool, jo2, bytes.read_i32_le(g_slotmap, bn * 4))
+                  bytes.set_i32_le(g_pool, jo2 + 4, bytes.read_i32_le(g_slotmap, cn3 * 4))
+                  bytes.set_f32_le(g_pool, jo2 + 8, jnumf(j0, "stiffness", 1.0))
+                  bytes.set_f32_le(g_pool, jo2 + 12, jnumf(j0, "gravityPower", 0.0))
+                  let gd = option.unwrap_or(json.get_array(j0, "gravityDir"), [])
+                  bytes.set_f32_le(g_pool, jo2 + 16, lf(gd, 0, 0.0))
+                  bytes.set_f32_le(g_pool, jo2 + 20, lf(gd, 1, 0.0 - 1.0))
+                  bytes.set_f32_le(g_pool, jo2 + 24, lf(gd, 2, 0.0))
+                  bytes.set_f32_le(g_pool, jo2 + 28, jnumf(j0, "dragForce", 0.5))
+                  bytes.set_f32_le(g_pool, jo2 + 32, jnumf(j0, "hitRadius", 0.0))
+                  bytes.set_i32_le(g_pool, jo2 + 88, 0)
+                  used = used + 1
+                } else {}
+                k5 = k5 + 1
+              }
+              s5 = s5 + 1
+            }
+            bytes.set_i32_le(g_spring, 0, used)
+            bytes.set_i32_le(g_spring, 4, jb2)
+          },
+          none => {},
+        },
+        none => {},
+      }
     } else {}
 
     let n_meshes = arr_len(gltf, "meshes")
@@ -826,8 +930,15 @@ pub fn set_skeleton(n: Int, nodes_ptr: Int) -> Int = {
       bytes.set_f32_le(g_node_rot, i * 16 + 4, 0.0)
       bytes.set_f32_le(g_node_rot, i * 16 + 8, 0.0)
       bytes.set_f32_le(g_node_rot, i * 16 + 12, 1.0)
+      bytes.set_f32_le(g_spring_rot, i * 16, 0.0)
+      bytes.set_f32_le(g_spring_rot, i * 16 + 4, 0.0)
+      bytes.set_f32_le(g_spring_rot, i * 16 + 8, 0.0)
+      bytes.set_f32_le(g_spring_rot, i * 16 + 12, 1.0)
       i = i + 1
     }
+    bytes.set_i32_le(g_spring, 0, 0)
+    bytes.set_i32_le(g_spring, 8, 0)
+    bytes.set_f32_le(g_spring, 16, 0.0)
     bytes.set_i32_le(g_n_skins, 0, 0)
     n
   }
@@ -897,8 +1008,8 @@ pub fn set_bg(r: Float, g: Float, b: Float) -> Int = {
   0
 }
 
-// Recompute world matrices + skin palettes, then re-blend every prim.
-pub fn recompute_skin() -> Int = {
+// Recompute world matrices + skin palettes only (no prim rebuild).
+pub fn recompute_world() -> Int = {
   let n = bytes.read_i32_le(g_skel, 0)
   if n == 0 then 0
   else {
@@ -930,12 +1041,203 @@ pub fn recompute_skin() -> Int = {
       }
       s = s + 1
     }
+    0
+  }
+}
+
+// Recompute world matrices + skin palettes, then re-blend every prim.
+pub fn recompute_skin() -> Int = {
+  if bytes.read_i32_le(g_skel, 0) == 0 then 0
+  else {
+    let _ = recompute_world()
     var p = 0
     let np = bytes.read_i32_le(g_n_prims, 0)
     while p < np {
       let _ = rebuild_prim(p)
       p = p + 1
     }
+    0
+  }
+}
+
+// world position (col3) of a slot, written to out_off (3 f32) in pool
+fn world_pos(world: Int, slot: Int, out_off: Int) -> Unit = {
+  bytes.set_f32_le(g_pool, out_off, bytes.read_f32_le(g_pool, world + slot * 64 + 48))
+  bytes.set_f32_le(g_pool, out_off + 4, bytes.read_f32_le(g_pool, world + slot * 64 + 52))
+  bytes.set_f32_le(g_pool, out_off + 8, bytes.read_f32_le(g_pool, world + slot * 64 + 56))
+}
+
+// Spring-bone Verlet step (three-vrm faithful, world space, no center space).
+// Strategy per tick:
+//   1. zero the spring quat layer, recompute_world → "rest-with-pose" matrices
+//   2. simulate every joint against those rest matrices, write new spring quats
+//   3. recompute_skin → final matrices + palettes + vertex rebuild
+pub fn spring_tick(dt: Float) -> Int = {
+  let nj = bytes.read_i32_le(g_spring, 0)
+  if nj == 0 or dt <= 0.0 then 0
+  else {
+    let base = bytes.data_ptr(g_pool)
+    let jblob = bytes.read_i32_le(g_spring, 4) - base
+    let ncol = bytes.read_i32_le(g_spring, 8)
+    let cblob = bytes.read_i32_le(g_spring, 12) - base
+    let world = bytes.read_i32_le(g_skel, 8) - base
+    // 1: rest-with-pose world (spring layer zeroed)
+    var z = 0
+    let nn = bytes.read_i32_le(g_skel, 0)
+    while z < nn {
+      bytes.set_f32_le(g_spring_rot, z * 16, 0.0)
+      bytes.set_f32_le(g_spring_rot, z * 16 + 4, 0.0)
+      bytes.set_f32_le(g_spring_rot, z * 16 + 8, 0.0)
+      bytes.set_f32_le(g_spring_rot, z * 16 + 12, 1.0)
+      z = z + 1
+    }
+    let _ = recompute_world()
+    // scratch: bone pos (12B) + child rest pos (12B)
+    let tmp = bytes.read_i32_le(g_skel, 12) - base   // reuse 64B compose scratch
+    var ji = 0
+    while ji < nj {
+      let jo = jblob + ji * SPRING_BLOB
+      let bone = bytes.read_i32_le(g_pool, jo)
+      let child = bytes.read_i32_le(g_pool, jo + 4)
+      if bone >= 0 and child >= 0 then {
+        world_pos(world, bone, tmp)
+        world_pos(world, child, tmp + 16)
+        let bx2 = bytes.read_f32_le(g_pool, tmp)
+        let by2 = bytes.read_f32_le(g_pool, tmp + 4)
+        let bz2 = bytes.read_f32_le(g_pool, tmp + 8)
+        let rx = bytes.read_f32_le(g_pool, tmp + 16)
+        let ry = bytes.read_f32_le(g_pool, tmp + 20)
+        let rz = bytes.read_f32_le(g_pool, tmp + 24)
+        var ax = rx - bx2
+        var ay = ry - by2
+        var az = rz - bz2
+        let blen = math.sqrt(ax * ax + ay * ay + az * az)
+        if blen > 0.000001 then {
+          ax = ax / blen
+          ay = ay / blen
+          az = az / blen
+          // first tick: tails start at the rest child position
+          if bytes.read_i32_le(g_pool, jo + 88) == 0 then {
+            bytes.set_f32_le(g_pool, jo + 52, rx)
+            bytes.set_f32_le(g_pool, jo + 56, ry)
+            bytes.set_f32_le(g_pool, jo + 60, rz)
+            bytes.set_f32_le(g_pool, jo + 64, rx)
+            bytes.set_f32_le(g_pool, jo + 68, ry)
+            bytes.set_f32_le(g_pool, jo + 72, rz)
+            bytes.set_i32_le(g_pool, jo + 88, 1)
+          } else {}
+          let stiff = bytes.read_f32_le(g_pool, jo + 8)
+          let gpow = bytes.read_f32_le(g_pool, jo + 12)
+          let gdx = bytes.read_f32_le(g_pool, jo + 16)
+          let gdy = bytes.read_f32_le(g_pool, jo + 20)
+          let gdz = bytes.read_f32_le(g_pool, jo + 24)
+          let drag = bytes.read_f32_le(g_pool, jo + 28)
+          let hitr = bytes.read_f32_le(g_pool, jo + 32)
+          let cx = bytes.read_f32_le(g_pool, jo + 52)
+          let cy = bytes.read_f32_le(g_pool, jo + 56)
+          let cz = bytes.read_f32_le(g_pool, jo + 60)
+          let px2 = bytes.read_f32_le(g_pool, jo + 64)
+          let py2 = bytes.read_f32_le(g_pool, jo + 68)
+          let pz2 = bytes.read_f32_le(g_pool, jo + 72)
+          // Verlet
+          var nx = cx + (cx - px2) * (1.0 - drag) + ax * stiff * dt + gdx * gpow * dt
+          var ny = cy + (cy - py2) * (1.0 - drag) + ay * stiff * dt + gdy * gpow * dt
+          var nz = cz + (cz - pz2) * (1.0 - drag) + az * stiff * dt + gdz * gpow * dt
+          // length constraint
+          var dx = nx - bx2
+          var dy = ny - by2
+          var dz = nz - bz2
+          var dl = math.sqrt(dx * dx + dy * dy + dz * dz)
+          if dl < 0.000001 then { dx = ax; dy = ay; dz = az; dl = 1.0 } else {}
+          nx = bx2 + dx / dl * blen
+          ny = by2 + dy / dl * blen
+          nz = bz2 + dz / dl * blen
+          // sphere colliders push-out
+          var ci = 0
+          while ci < ncol {
+            let co = cblob + ci * COLLIDER_BLOB
+            let cslot = bytes.read_i32_le(g_pool, co)
+            if cslot >= 0 then {
+              // collider centre = node world pos + offset rotated by node world
+              let cwx = bytes.read_f32_le(g_pool, world + cslot * 64 + 48)
+              let cwy = bytes.read_f32_le(g_pool, world + cslot * 64 + 52)
+              let cwz = bytes.read_f32_le(g_pool, world + cslot * 64 + 56)
+              let ox = bytes.read_f32_le(g_pool, co + 4)
+              let oy = bytes.read_f32_le(g_pool, co + 8)
+              let oz = bytes.read_f32_le(g_pool, co + 12)
+              let ccx = cwx + bytes.read_f32_le(g_pool, world + cslot * 64) * ox + bytes.read_f32_le(g_pool, world + cslot * 64 + 16) * oy + bytes.read_f32_le(g_pool, world + cslot * 64 + 32) * oz
+              let ccy = cwy + bytes.read_f32_le(g_pool, world + cslot * 64 + 4) * ox + bytes.read_f32_le(g_pool, world + cslot * 64 + 20) * oy + bytes.read_f32_le(g_pool, world + cslot * 64 + 36) * oz
+              let ccz = cwz + bytes.read_f32_le(g_pool, world + cslot * 64 + 8) * ox + bytes.read_f32_le(g_pool, world + cslot * 64 + 24) * oy + bytes.read_f32_le(g_pool, world + cslot * 64 + 40) * oz
+              let rad = bytes.read_f32_le(g_pool, co + 16) + hitr
+              var ex = nx - ccx
+              var ey = ny - ccy
+              var ez = nz - ccz
+              let el = math.sqrt(ex * ex + ey * ey + ez * ez)
+              if el < rad and el > 0.000001 then {
+                nx = ccx + ex / el * rad
+                ny = ccy + ey / el * rad
+                nz = ccz + ez / el * rad
+                // re-apply length constraint after push-out
+                var fx = nx - bx2
+                var fy = ny - by2
+                var fz = nz - bz2
+                let fl = math.sqrt(fx * fx + fy * fy + fz * fz)
+                if fl > 0.000001 then {
+                  nx = bx2 + fx / fl * blen
+                  ny = by2 + fy / fl * blen
+                  nz = bz2 + fz / fl * blen
+                } else {}
+              } else {}
+            } else {}
+            ci = ci + 1
+          }
+          // store tails
+          bytes.set_f32_le(g_pool, jo + 64, cx)
+          bytes.set_f32_le(g_pool, jo + 68, cy)
+          bytes.set_f32_le(g_pool, jo + 72, cz)
+          bytes.set_f32_le(g_pool, jo + 52, nx)
+          bytes.set_f32_le(g_pool, jo + 56, ny)
+          bytes.set_f32_le(g_pool, jo + 60, nz)
+          // spring quat: world-space fromTo(restDir, newDir) localized via the
+          // bone's rest-world ROTATION (VRM node scales on spring chains are 1,
+          // so the transpose is the inverse).
+          let ndx = (nx - bx2) / blen
+          let ndy = (ny - by2) / blen
+          let ndz = (nz - bz2) / blen
+          // localize both dirs by R^T of bone rest world
+          let m0 = bytes.read_f32_le(g_pool, world + bone * 64)
+          let m1 = bytes.read_f32_le(g_pool, world + bone * 64 + 4)
+          let m2 = bytes.read_f32_le(g_pool, world + bone * 64 + 8)
+          let m4 = bytes.read_f32_le(g_pool, world + bone * 64 + 16)
+          let m5 = bytes.read_f32_le(g_pool, world + bone * 64 + 20)
+          let m6 = bytes.read_f32_le(g_pool, world + bone * 64 + 24)
+          let m8 = bytes.read_f32_le(g_pool, world + bone * 64 + 32)
+          let m9 = bytes.read_f32_le(g_pool, world + bone * 64 + 36)
+          let m10 = bytes.read_f32_le(g_pool, world + bone * 64 + 40)
+          let lax = m0 * ax + m1 * ay + m2 * az
+          let lay = m4 * ax + m5 * ay + m6 * az
+          let laz = m8 * ax + m9 * ay + m10 * az
+          let lnx = m0 * ndx + m1 * ndy + m2 * ndz
+          let lny = m4 * ndx + m5 * ndy + m6 * ndz
+          let lnz = m8 * ndx + m9 * ndy + m10 * ndz
+          // quat from lA to lN: (cross, 1+dot) normalized
+          var qx2 = lay * lnz - laz * lny
+          var qy2 = laz * lnx - lax * lnz
+          var qz2 = lax * lny - lay * lnx
+          var qw2 = 1.0 + lax * lnx + lay * lny + laz * lnz
+          let qn = math.sqrt(qx2 * qx2 + qy2 * qy2 + qz2 * qz2 + qw2 * qw2)
+          if qn > 0.000001 then {
+            bytes.set_f32_le(g_spring_rot, bone * 16, qx2 / qn)
+            bytes.set_f32_le(g_spring_rot, bone * 16 + 4, qy2 / qn)
+            bytes.set_f32_le(g_spring_rot, bone * 16 + 8, qz2 / qn)
+            bytes.set_f32_le(g_spring_rot, bone * 16 + 12, qw2 / qn)
+          } else {}
+        } else {}
+      } else {}
+      ji = ji + 1
+    }
+    // 3: final matrices + rebuild
+    let _ = recompute_skin()
     0
   }
 }
@@ -1177,6 +1479,14 @@ fn draw_prim_toon(po: Int) -> Unit = {
 }
 
 pub effect fn render_frame(time: Float) -> Unit = {
+  // spring-bone tick (dt clamped; first frame only primes last_time)
+  if bytes.read_i32_le(g_spring, 0) > 0 then {
+    let last = bytes.read_f32_le(g_spring, 16)
+    bytes.set_f32_le(g_spring, 16, time)
+    if last > 0.0 and time > last then {
+      let _ = spring_tick(float.min(time - last, 0.033))
+    } else {}
+  } else {}
   webgl.clear_color(bytes.read_f32_le(g_view, 12), bytes.read_f32_le(g_view, 16), bytes.read_f32_le(g_view, 20), 1.0)
   webgl.clear(webgl.color_buffer_bit() + webgl.depth_buffer_bit())
   let n = bytes.read_i32_le(g_n_prims, 0)
