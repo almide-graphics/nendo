@@ -77,23 +77,42 @@ function pHumanoid(json){
     (ext.VRM.humanoid.humanBones||[]).forEach(b=>{out[b.bone]=b.node;});
   return out;}
 
+// ── category definitions ──
+// test: material-name predicate; anchor: humanoid role the part rides on;
+// morphs: carry morph targets + donor expression binds (face decals need it
+// so blink/expressions keep working on the transplanted lashes/irises).
+const PART_CATEGORIES={
+  hair:  {test:n=>/hair/i.test(n), anchor:"head",  morphs:false, label:"髪"},
+  face:  {test:n=>/(_FACE|_EYE|FaceBrow|FaceEyelash|FaceEyeline|EyeIris|EyeHighlight|EyeWhite|FaceMouth)/i.test(n)&&!/skin/i.test(n), anchor:"head", morphs:true, label:"顔"},
+  cloth: {test:n=>/(cloth|onepiece|tops|bottoms|skirt|shoes|accessor)/i.test(n), anchor:"hips", morphs:false, label:"衣装"},
+};
+function transplantHair(recBuf,donBuf){return transplantParts(recBuf,donBuf,"hair");}
+
 // ── the transplant ──
 // recBuf/donBuf: ArrayBuffers. Returns a new ArrayBuffer (valid VRM).
-function transplantHair(recBuf,donBuf){
+function transplantParts(recBuf,donBuf,category){
+  const CAT=PART_CATEGORIES[category];
+  if(!CAT)throw new Error("unknown category "+category);
   const R=pGlb(recBuf), D=pGlb(donBuf);
   const rj=JSON.parse(JSON.stringify(R.json)); // deep clone, we mutate freely
   const dj=D.json;
   const recBin=new Uint8Array(recBuf,R.binOff);
 
-  const hairMat=(json,mi)=>/hair/i.test(((json.materials||[])[mi]||{}).name||"");
+  const hairMat=(json,mi)=>CAT.test(((json.materials||[])[mi]||{}).name||"");
 
   // every recipient bufferView keeps its original bytes
   const srcOf=new Map(); // bvIndex(in rj) → Uint8Array
   rj.bufferViews.forEach((bv,i)=>srcOf.set(i,recBin.subarray(bv.byteOffset||0,(bv.byteOffset||0)+bv.byteLength)));
   const addBv=(bytes)=>{rj.bufferViews.push({buffer:0,byteOffset:0,byteLength:bytes.length});srcOf.set(rj.bufferViews.length-1,bytes);return rj.bufferViews.length-1;};
 
-  // ── 1. strip recipient hair (prims + hair-ish springs) ──
-  rj.meshes.forEach(m=>{m.primitives=m.primitives.filter(p=>!hairMat(rj,p.material));});
+  // ── 1. strip recipient parts of this category (prims + matching springs) ──
+  rj.meshes.forEach(m=>{
+    const kept=m.primitives.filter(p=>!hairMat(rj,p.material));
+    if(kept.length!==m.primitives.length&&kept.length&&m.primitives[0].targets){
+      // glTF: all prims of a mesh share the weights array; keeping a subset is fine
+    }
+    m.primitives=kept;
+  });
   const removedMesh=new Set();
   rj.meshes.forEach((m,i)=>{if(!m.primitives.length)removedMesh.add(i);});
   if(removedMesh.size){
@@ -105,26 +124,28 @@ function transplantHair(recBuf,donBuf){
     });
   }
   const rsb=(rj.extensions||{}).VRMC_springBone;
-  if(rsb&&rsb.springs){
+  const springKill=category==="hair"?/hair/i:category==="cloth"?/skirt|coat|cloth|sode|sleeve/i:null;
+  if(rsb&&rsb.springs&&springKill){
     rsb.springs=rsb.springs.filter(s=>{
       const names=(s.joints||[]).map(jt=>(rj.nodes[jt.node]||{}).name||"");
-      return !(/hair/i.test(s.name||"")||names.some(n=>/hair|J_Sec_Hair/i.test(n)));
+      return !(springKill.test(s.name||"")||names.some(n=>springKill.test(n)));
     });
   }
 
   // ── 2. donor hair prims + their skins ──
   const donorMeshSkin={};
   dj.nodes.forEach(nd=>{if(nd.mesh!=null&&nd.skin!=null)donorMeshSkin[nd.mesh]=nd.skin;});
-  const hairPrims=[]; // {prim, skinIdx}
+  const hairPrims=[]; // {prim, skinIdx, meshIdx}
   dj.meshes.forEach((m,mi)=>m.primitives.forEach(p=>{
-    if(hairMat(dj,p.material))hairPrims.push({prim:p,skinIdx:donorMeshSkin[mi]});
+    if(hairMat(dj,p.material))hairPrims.push({prim:p,skinIdx:donorMeshSkin[mi],meshIdx:mi});
   }));
   if(!hairPrims.length)throw new Error("ドナーに髪マテリアルのプリミティブが見つかりません");
 
   // ── 3. T = recHeadWorld · donorHeadWorld⁻¹ ──
   const dHm=pHumanoid(dj), rHm=pHumanoid(rj);
-  if(dHm.head==null||rHm.head==null)throw new Error("humanoid head が見つかりません");
-  const T=m4Mul(pNodeWorld(rj,rHm.head),m4Inv(pNodeWorld(dj,dHm.head)));
+  const anchor=CAT.anchor;
+  if(dHm[anchor]==null||rHm[anchor]==null)throw new Error("humanoid "+anchor+" が見つかりません");
+  const T=m4Mul(pNodeWorld(rj,rHm[anchor]),m4Inv(pNodeWorld(dj,dHm[anchor])));
   const Tinv=m4Inv(T);
   const donorRole={};for(const[role,n]of Object.entries(dHm))donorRole[n]=role;
 
@@ -151,7 +172,7 @@ function transplantHair(recBuf,donBuf){
     const myNew=nodeMap.get(dn);
     let attach=null;
     if(p>=0&&nodeMap.has(p))attach=nodeMap.get(p);
-    if(attach==null)attach=rHm.head;       // orphan chains hang off the head
+    if(attach==null)attach=rHm[anchor];    // orphan chains hang off the anchor
     (rj.nodes[attach].children=rj.nodes[attach].children||[]).push(myNew);
   });
 
@@ -162,7 +183,7 @@ function transplantHair(recBuf,donBuf){
     const joints=sk.joints.map(jn=>{
       if(nodeMap.has(jn))return nodeMap.get(jn);
       // role joint missing in recipient: degrade to head
-      return rHm[donorRole[jn]]!=null?rHm[donorRole[jn]]:rHm.head;
+      return rHm[donorRole[jn]]!=null?rHm[donorRole[jn]]:rHm[anchor];
     });
     const ibm=new Float32Array(pAccBytes(D,sk.inverseBindMatrices).buffer);
     const out=new Float32Array(ibm.length);
@@ -219,8 +240,7 @@ function transplantHair(recBuf,donBuf){
         f[i*3]=v[0];f[i*3+1]=v[1];f[i*3+2]=v[2];
         for(let c=0;c<3;c++){mn[c]=Math.min(mn[c],v[c]);mx[c]=Math.max(mx[c],v[c]);}
       }
-      const acc={bufferView:addBv(bytes),componentType:5126,count:a.count,type:"VEC3"};
-      if(kind==="pos"){acc.min=mn;acc.max=mx;}
+      const acc={bufferView:addBv(bytes),componentType:5126,count:a.count,type:"VEC3",min:mn,max:mx};
       rj.accessors.push(acc);return rj.accessors.length-1;
     }
     rj.accessors.push({bufferView:addBv(bytes),byteOffset:0,componentType:a.componentType,
@@ -228,6 +248,7 @@ function transplantHair(recBuf,donBuf){
     return rj.accessors.length-1;};
 
   rj.scenes=rj.scenes||[{nodes:[]}];
+  const donorMeshNewNode=new Map(); // donor mesh idx → [new node idx]
   hairPrims.forEach((h,k)=>{
     const a=h.prim.attributes;
     const attrs={POSITION:accCopy(a.POSITION,"pos")};
@@ -236,11 +257,47 @@ function transplantHair(recBuf,donBuf){
     if(a.JOINTS_0!=null)attrs.JOINTS_0=accCopy(a.JOINTS_0);
     if(a.WEIGHTS_0!=null)attrs.WEIGHTS_0=accCopy(a.WEIGHTS_0);
     const prim={attributes:attrs,indices:accCopy(h.prim.indices),material:copyMaterial(h.prim.material)};
-    rj.meshes.push({name:"Hair_part_"+k,primitives:[prim]});
-    rj.nodes.push({name:"Hair_part_"+k,mesh:rj.meshes.length-1,
+    const mesh={name:CAT.label+"_part_"+k,primitives:[prim]};
+    if(CAT.morphs&&h.prim.targets&&h.prim.targets.length){
+      prim.targets=h.prim.targets.map(t=>{
+        const out={};
+        if(t.POSITION!=null&&!dj.accessors[t.POSITION].sparse)out.POSITION=accCopy(t.POSITION,"norm"); // deltas: rotate by T
+        return out;
+      });
+      const names=(h.prim.extras&&h.prim.extras.targetNames)||(dj.meshes[h.meshIdx]&&dj.meshes[h.meshIdx].extras&&dj.meshes[h.meshIdx].extras.targetNames);
+      if(names)mesh.extras={targetNames:names};
+      mesh.weights=new Array(h.prim.targets.length).fill(0);
+    }
+    rj.meshes.push(mesh);
+    rj.nodes.push({name:CAT.label+"_part_"+k,mesh:rj.meshes.length-1,
       ...(h.skinIdx!=null&&skinMap.has(h.skinIdx)?{skin:skinMap.get(h.skinIdx)}:{})});
     rj.scenes[0].nodes.push(rj.nodes.length-1);
+    if(h.meshIdx!=null){
+      if(!donorMeshNewNode.has(h.meshIdx))donorMeshNewNode.set(h.meshIdx,[]);
+      donorMeshNewNode.get(h.meshIdx).push(rj.nodes.length-1);
+    }
   });
+
+  // ── 7b. expression binds for morph-bearing parts (face decals) ──
+  if(CAT.morphs){
+    const dEx=(((dj.extensions||{}).VRMC_vrm)||{}).expressions||{};
+    const rEx=(((rj.extensions||{}).VRMC_vrm)||{}).expressions;
+    if(rEx){
+      for(const grp of ["preset","custom"]){
+        for(const[name,ex]of Object.entries(dEx[grp]||{})){
+          const tgt=(rEx[grp]||{})[name];
+          if(!tgt)continue;
+          (ex.morphTargetBinds||[]).forEach(b=>{
+            const dm=dj.nodes[b.node]&&dj.nodes[b.node].mesh;
+            if(dm==null||!donorMeshNewNode.has(dm))return;
+            donorMeshNewNode.get(dm).forEach(nn=>{
+              (tgt.morphTargetBinds=tgt.morphTargetBinds||[]).push({node:nn,index:b.index,weight:b.weight});
+            });
+          });
+        }
+      }
+    }
+  }
 
   // ── 8. donor hair springs + name-role-mapped colliders ──
   const dsb=(dj.extensions||{}).VRMC_springBone;

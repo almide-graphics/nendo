@@ -60,7 +60,8 @@
         <h2>ルックプリセット</h2>
         <div id="presets" style="display:flex;flex-wrap:wrap;gap:6px"></div>
         <div class="crow" style="margin-top:6px"><input id="presetName" type="text" placeholder="プリセット名"><button class="clr" id="presetSave" style="color:#6c63ff;font-size:12px">＋保存</button></div>
-        <h2>髪カタログ <span style="text-transform:none;color:#667">(クリックで試着)</span></h2>
+        <h2>パーツカタログ <span style="text-transform:none;color:#667">(クリックで試着)</span></h2>
+        <div id="partCats" style="display:flex;gap:6px;margin-bottom:6px"></div>
         <div id="hairCatalog" style="display:flex;flex-wrap:wrap;gap:6px"></div>
         <div class="crow" style="margin-top:4px"><label>自分のVRM</label><button class="clr" id="hairBtn" style="color:#6c63ff;font-size:12px">選ぶ…</button>
           <input id="hairFile" type="file" accept=".vrm,.glb" class="hidden"></div>
@@ -815,7 +816,11 @@ function applyUrlParams(){
   const op=q.get("open");
   if(op){ fetch(op).then(r=>r.arrayBuffer()).then(b=>{openDocument(b);}); }
   const hd=q.get("hairdonor");
-  if(hd&&doc){ fetch(hd).then(r=>r.arrayBuffer()).then(doHairTransplant); }
+  if(hd&&doc){ fetch(hd).then(r=>r.arrayBuffer()).then(b=>{doPartTransplant(b,"hair");const e=q.get("expr");if(e)setTimeout(()=>applyExprString(e),300);}); }
+  const fd=q.get("facedonor");
+  if(fd&&doc){ fetch(fd).then(r=>r.arrayBuffer()).then(b=>{doPartTransplant(b,"face");const e=q.get("expr");if(e)setTimeout(()=>applyExprString(e),300);}); }
+  const cd=q.get("clothdonor");
+  if(cd&&doc){ fetch(cd).then(r=>r.arrayBuffer()).then(b=>{doPartTransplant(b,"cloth");const e=q.get("expr");if(e)setTimeout(()=>applyExprString(e),300);}); }
   const bg=q.get("bg");
   if(bg)inst.exports.set_bg(parseInt(bg.slice(0,2),16)/255,parseInt(bg.slice(2,4),16)/255,parseInt(bg.slice(4,6),16)/255);
   if(q.get("dbg3")&&doc.faceTi){
@@ -871,34 +876,67 @@ function applyUrlParams(){
 }
 
 // ── parts transplant ──
-async function doHairTransplant(donorBuf){
+function applyExprString(expr){
+  const list=exprList();
+  expr.split(",").forEach(pair=>{const [nm,v]=pair.split(":");
+    const e=list.find(x=>x.name===nm);
+    if(e){doc.ui.expr[nm]=parseFloat(v||"1");applyBinds(e.binds,parseFloat(v||"1"));}
+    if(exprInputs[nm])exprInputs[nm].value=parseFloat(v||"1");
+  });
+}
+let partCategory="hair";
+async function doPartTransplant(donorBuf,cat){
+  cat=cat||partCategory;
   try{
-    const out=transplantHair(doc.originalBuf,donorBuf);
+    const out=transplantParts(doc.originalBuf,donorBuf,cat);
     openDocument(out);
-    status.textContent+="  髪を移植しました";
+    status.textContent+="  "+PART_CATEGORIES[cat].label+"を移植しました";
   }catch(e){ status.textContent="移植エラー: "+e.message; console.error(e); }
 }
+const doHairTransplant=b=>doPartTransplant(b,"hair");
 document.getElementById("hairBtn").addEventListener("click",()=>document.getElementById("hairFile").click());
-// hair catalog palette (thumbs from parts_catalog/manifest.json)
-fetch("parts_catalog/manifest.json").then(r=>r.json()).then(list=>{
-  const grid=document.getElementById("hairCatalog");
-  list.forEach(it=>{
+// parts catalog palette (thumbs from parts_catalog/manifest.json)
+let catalogList=[];
+function renderPartGrid(){
+  const grid=document.getElementById("hairCatalog"); grid.innerHTML="";
+  if(!catalogList.length){grid.innerHTML='<i style="color:#556">カタログなし</i>';return;}
+  catalogList.forEach(it=>{
+    const thumb=partCategory==="cloth"&&it.bodyThumb?it.bodyThumb:it.thumb;
     const cell=document.createElement("div");
     cell.style.cssText="width:64px;cursor:pointer;text-align:center";
-    cell.innerHTML=`<img src="parts_catalog/${it.thumb}" style="width:60px;height:60px;border:1px solid #3a3a52;border-radius:8px;object-fit:cover">
+    cell.innerHTML=`<img src="parts_catalog/${thumb}" style="width:60px;height:60px;border:1px solid #3a3a52;border-radius:8px;object-fit:cover">
       <div style="font-size:10px;color:#8a8aa0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${it.name}</div>`;
     cell.addEventListener("click",async()=>{
       cell.firstElementChild.style.borderColor="#6c63ff";
-      status.textContent="髪を取得中… "+it.name;
+      status.textContent=PART_CATEGORIES[partCategory].label+"を取得中… "+it.name;
       const buf=await (await fetch("parts_catalog/"+it.file)).arrayBuffer();
-      doHairTransplant(buf);
+      doPartTransplant(buf);
     });
     grid.appendChild(cell);
   });
-}).catch(()=>{document.getElementById("hairCatalog").innerHTML='<i style="color:#556">カタログなし</i>';});
+}
+fetch("parts_catalog/manifest.json").then(r=>r.json()).then(list=>{catalogList=list;renderPartGrid();})
+  .catch(()=>{renderPartGrid();});
 document.getElementById("hairFile").addEventListener("change",async function(){
-  const f=this.files[0]; if(f&&doc)doHairTransplant(await f.arrayBuffer());
+  const f=this.files[0]; if(f&&doc)doPartTransplant(await f.arrayBuffer());
 });
+// category chips
+(function(){
+  const bar=document.getElementById("partCats");
+  for(const[k,c]of Object.entries(PART_CATEGORIES)){
+    const b=document.createElement("button");
+    b.textContent=c.label;
+    b.style.cssText="padding:3px 12px;border-radius:12px;border:1px solid #3a3a52;background:#26263a;color:#aab;cursor:pointer;font-size:12px";
+    if(k===partCategory){b.style.background="#6c63ff";b.style.color="#fff";}
+    b.addEventListener("click",()=>{
+      partCategory=k;
+      [...bar.children].forEach(x=>{x.style.background="#26263a";x.style.color="#aab";});
+      b.style.background="#6c63ff";b.style.color="#fff";
+      renderPartGrid();
+    });
+    bar.appendChild(b);
+  }
+})();
 
 // ── look presets (colors + title), persisted in localStorage ──
 function loadPresets(){ try{return JSON.parse(localStorage.getItem("nendo_presets")||"[]");}catch(e){return [];} }
