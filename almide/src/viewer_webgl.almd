@@ -61,6 +61,10 @@ let NODE_BLOB = 44
 let g_skel = bytes.new(16)          // [n_nodes][nodes_ptr][world_ptr][tmp_ptr]
 let g_node_scale = bytes.new(6144)  // 512 x 3 f32 (default 1)
 let g_node_off = bytes.new(6144)    // 512 x 3 f32 (default 0)
+let g_node_rot = bytes.new(8192)    // 512 x quat f32x4 pose override (default identity)
+
+// view settings: [sun dx,dy,dz][bg r,g,b] f32 x6
+let g_view = bytes.new(24)
 
 let MAX_SKINS = 16
 // per skin: [n_joints:i32][joints_ptr:i32][ibm_ptr:i32][palette_ptr:i32]
@@ -93,10 +97,19 @@ fn compose_local(d: Int, slot: Int) -> Unit = {
   let tx = bytes.read_f32_le(g_pool, nb + 4) + bytes.read_f32_le(g_node_off, slot * 12)
   let ty = bytes.read_f32_le(g_pool, nb + 8) + bytes.read_f32_le(g_node_off, slot * 12 + 4)
   let tz = bytes.read_f32_le(g_pool, nb + 12) + bytes.read_f32_le(g_node_off, slot * 12 + 8)
-  let qx = bytes.read_f32_le(g_pool, nb + 16)
-  let qy = bytes.read_f32_le(g_pool, nb + 20)
-  let qz = bytes.read_f32_le(g_pool, nb + 24)
-  let qw = bytes.read_f32_le(g_pool, nb + 28)
+  let bx = bytes.read_f32_le(g_pool, nb + 16)
+  let by = bytes.read_f32_le(g_pool, nb + 20)
+  let bz = bytes.read_f32_le(g_pool, nb + 24)
+  let bw = bytes.read_f32_le(g_pool, nb + 28)
+  // pose override composes in local space: q = q_base x q_pose
+  let px = bytes.read_f32_le(g_node_rot, slot * 16)
+  let py = bytes.read_f32_le(g_node_rot, slot * 16 + 4)
+  let pz = bytes.read_f32_le(g_node_rot, slot * 16 + 8)
+  let pw = bytes.read_f32_le(g_node_rot, slot * 16 + 12)
+  let qw = bw * pw - bx * px - by * py - bz * pz
+  let qx = bw * px + bx * pw + by * pz - bz * py
+  let qy = bw * py - bx * pz + by * pw + bz * px
+  let qz = bw * pz + bx * py - by * px + bz * pw
   let sx = bytes.read_f32_le(g_pool, nb + 32) * bytes.read_f32_le(g_node_scale, slot * 12)
   let sy = bytes.read_f32_le(g_pool, nb + 36) * bytes.read_f32_le(g_node_scale, slot * 12 + 4)
   let sz = bytes.read_f32_le(g_pool, nb + 40) * bytes.read_f32_le(g_node_scale, slot * 12 + 8)
@@ -329,6 +342,8 @@ effect fn main() -> Unit = {
   bytes.set_f32_le(g_cam, 0, 0.0)
   bytes.set_f32_le(g_cam, 4, 0.05)
   bytes.set_f32_le(g_cam, 8, 3.0)
+  let _ = set_light_dir(0.35, 0.7, 0.5)
+  let _ = set_bg(0.08, 0.085, 0.11)
 
   render_frame(0.0)
   on_pointer_down(0.0, 0.0, 0)
@@ -351,7 +366,9 @@ effect fn main() -> Unit = {
   let _ = set_prim_skin(0 - 1, 0 - 1, 0)
   let _ = set_node_scale(0 - 1, 1.0, 1.0, 1.0)
   let _ = set_node_offset(0 - 1, 0.0, 0.0, 0.0)
+  let _ = set_node_rotation(0 - 1, 0.0, 0.0, 0.0, 1.0)
   let _ = recompute_skin()
+  let _ = get_prim_work(0 - 1)
 }
 
 pub fn set_aspect(a: Float) -> Int = {
@@ -543,6 +560,10 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
 
 pub fn get_prim_count() -> Int = bytes.read_i32_le(g_n_prims, 0)
 
+// debug: absolute work-buffer ptr of a prim (0 if none yet)
+pub fn get_prim_work(pid: Int) -> Int =
+  if pid >= 0 and pid < MAX_PRIMS then bytes.read_i32_le(g_prim_meta, pid * PRIM_STRIDE + 56) else 0
+
 // ── Skinning API ──
 
 pub fn set_skeleton(n: Int, nodes_ptr: Int) -> Int = {
@@ -560,6 +581,10 @@ pub fn set_skeleton(n: Int, nodes_ptr: Int) -> Int = {
       bytes.set_f32_le(g_node_off, i * 12, 0.0)
       bytes.set_f32_le(g_node_off, i * 12 + 4, 0.0)
       bytes.set_f32_le(g_node_off, i * 12 + 8, 0.0)
+      bytes.set_f32_le(g_node_rot, i * 16, 0.0)
+      bytes.set_f32_le(g_node_rot, i * 16 + 4, 0.0)
+      bytes.set_f32_le(g_node_rot, i * 16 + 8, 0.0)
+      bytes.set_f32_le(g_node_rot, i * 16 + 12, 1.0)
       i = i + 1
     }
     bytes.set_i32_le(g_n_skins, 0, 0)
@@ -605,6 +630,30 @@ pub fn set_node_offset(slot: Int, dx: Float, dy: Float, dz: Float) -> Int = {
     bytes.set_f32_le(g_node_off, slot * 12 + 8, dz)
     0
   } else 0
+}
+
+pub fn set_node_rotation(slot: Int, x: Float, y: Float, z: Float, w: Float) -> Int = {
+  if slot >= 0 and slot < MAX_NODES then {
+    bytes.set_f32_le(g_node_rot, slot * 16, x)
+    bytes.set_f32_le(g_node_rot, slot * 16 + 4, y)
+    bytes.set_f32_le(g_node_rot, slot * 16 + 8, z)
+    bytes.set_f32_le(g_node_rot, slot * 16 + 12, w)
+    0
+  } else 0
+}
+
+pub fn set_light_dir(x: Float, y: Float, z: Float) -> Int = {
+  bytes.set_f32_le(g_view, 0, x)
+  bytes.set_f32_le(g_view, 4, y)
+  bytes.set_f32_le(g_view, 8, z)
+  0
+}
+
+pub fn set_bg(r: Float, g: Float, b: Float) -> Int = {
+  bytes.set_f32_le(g_view, 12, r)
+  bytes.set_f32_le(g_view, 16, g)
+  bytes.set_f32_le(g_view, 20, b)
+  0
 }
 
 // Recompute world matrices + skin palettes, then re-blend every prim.
@@ -887,6 +936,7 @@ fn draw_prim_toon(po: Int) -> Unit = {
 }
 
 pub effect fn render_frame(time: Float) -> Unit = {
+  webgl.clear_color(bytes.read_f32_le(g_view, 12), bytes.read_f32_le(g_view, 16), bytes.read_f32_le(g_view, 20), 1.0)
   webgl.clear(webgl.color_buffer_bit() + webgl.depth_buffer_bit())
   let n = bytes.read_i32_le(g_n_prims, 0)
   let ex = eye_pos(0)
@@ -942,7 +992,8 @@ pub effect fn render_frame(time: Float) -> Unit = {
   webgl.uniform_matrix4fv(webgl.get_state(S_T_MVP), mvp)
   webgl.uniform_matrix4fv(webgl.get_state(S_T_MODEL), model)
   webgl.uniform3f(webgl.get_state(S_T_EYE), ex, ey, ez)
-  webgl.uniform3f(webgl.get_state(S_T_SUN), 0.35, 0.7, 0.5)
+  webgl.uniform3f(webgl.get_state(S_T_SUN),
+    bytes.read_f32_le(g_view, 0), bytes.read_f32_le(g_view, 4), bytes.read_f32_le(g_view, 8))
   webgl.uniform3f(webgl.get_state(S_T_LIGHT), 1.0, 0.97, 0.92)
   webgl.uniform1f(webgl.get_state(S_T_THRESH), 0.55)
   webgl.uniform1f(webgl.get_state(S_T_FEATHER), 0.03)

@@ -61,10 +61,17 @@
         <div id="colors"></div>
         <h2>テクスチャ <span style="text-transform:none;color:#667">(クリックで差し替え)</span></h2>
         <div id="texgrid"></div>
+        <h2>ビュー</h2>
+        <div class="crow"><label>背景</label><input id="bgColor" type="color" value="#14141c"><span style="color:#667;font-size:11px">保存対象外</span></div>
+        <div class="slider"><label>ライト方位</label><input id="lightAz" type="range" min="-1" max="1" step="0.01" value="0"><span class="val" id="lightAzV">0.00</span></div>
         <h2>メタ</h2>
         <div class="crow"><label>Title</label><input id="metaTitle" type="text"></div>
       </div>
-      <div class="tab" id="tab-body"><h2>パラメータ</h2><div id="bodyparams"><i style="color:#556">no skeleton</i></div></div>
+      <div class="tab" id="tab-body">
+        <h2>体型</h2><div id="bodyparams"><i style="color:#556">no skeleton</i></div>
+        <h2>顔 <span style="text-transform:none;color:#667">(プレビューのみ)</span></h2><div id="faceparams"></div>
+        <h2>姿勢 <span style="text-transform:none;color:#667">(プレビューのみ)</span></h2><div id="poseparams"></div>
+      </div>
       <div class="tab" id="tab-expr"><div id="exprs"></div></div>
       <div class="tab" id="tab-detail"><div id="morphs"></div></div>
     </div>
@@ -78,6 +85,7 @@
 <script src="webgl.js"></script>
 <script>
 const status=document.getElementById("status");
+window.addEventListener("error",e=>{status.textContent="JS ERROR: "+e.message+" @"+e.lineno;});
 const dropEl=document.getElementById("drop");
 const fileEl=document.getElementById("file");
 let inst=null, mem=null;
@@ -414,6 +422,109 @@ function scheduleSkin(){
   if(skinRaf)return; skinRaf=true;
   requestAnimationFrame(()=>{skinRaf=false;inst.exports.recompute_skin();});
 }
+
+// ── pose params (bone rotations; preview-only) ──
+const POSE_PARAMS=[
+  // lowering arms: rotate upperArm about Z, mirrored. ~70° at v=1.
+  {key:"腕を下ろす", apply(v){
+    const hm=doc.skel.humanoid;
+    [["leftUpperArm",-1],["rightUpperArm",1]].forEach(([bn,sgn])=>{
+      const node=hm[bn]; if(node==null)return;
+      const a=1.2*v*sgn, s=Math.sin(a/2), c=Math.cos(a/2);
+      inst.exports.set_node_rotation(BigInt(doc.skel.slotOf[node]),0,0,s,c);
+    });
+  }},
+  {key:"肘を曲げる", apply(v){
+    const hm=doc.skel.humanoid;
+    [["leftLowerArm",-1],["rightLowerArm",1]].forEach(([bn,sgn])=>{
+      const node=hm[bn]; if(node==null)return;
+      const a=1.1*v*sgn, s=Math.sin(a/2), c=Math.cos(a/2);
+      inst.exports.set_node_rotation(BigInt(doc.skel.slotOf[node]),0,s,0,c);
+    });
+  }},
+  {key:"首をかしげる", apply(v){
+    const hm=doc.skel.humanoid;
+    const node=hm.neck!=null?hm.neck:hm.head; if(node==null)return;
+    const a=0.4*v, s=Math.sin(a/2), c=Math.cos(a/2);
+    inst.exports.set_node_rotation(BigInt(doc.skel.slotOf[node]),0,0,s,c);
+  }},
+];
+
+// ── procedural face params: generated morph targets anchored on eye bones ──
+const FACE_PARAMS=["目の横幅","目の縦幅","目の高さ","目の距離"];
+function nodeWorldPos(json,ni){
+  // chain T*R*S down from root (translation only output)
+  let m=[1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
+  const chain=[];
+  let cur=ni;
+  const parent=new Array(json.nodes.length).fill(-1);
+  json.nodes.forEach((nd,i)=>(nd.children||[]).forEach(c=>parent[c]=i));
+  while(cur>=0){chain.unshift(cur);cur=parent[cur];}
+  const mul=(a,b)=>{const d=new Array(16);
+    for(let c=0;c<4;c++)for(let r=0;r<4;r++){let v=0;for(let k=0;k<4;k++)v+=a[k*4+r]*b[c*4+k];d[c*4+r]=v;}
+    return d;};
+  chain.forEach(i=>{
+    const nd=json.nodes[i],t=nd.translation||[0,0,0],q=nd.rotation||[0,0,0,1],s=nd.scale||[1,1,1];
+    const[x,y,z,w]=q;
+    const L=[(1-2*(y*y+z*z))*s[0],2*(x*y+z*w)*s[0],2*(x*z-y*w)*s[0],0,
+             2*(x*y-z*w)*s[1],(1-2*(x*x+z*z))*s[1],2*(y*z+x*w)*s[1],0,
+             2*(x*z+y*w)*s[2],2*(y*z-x*w)*s[2],(1-2*(x*x+y*y))*s[2],0,
+             t[0],t[1],t[2],1];
+    m=mul(m,L);
+  });
+  return [m[12],m[13],m[14]];
+}
+// generate per-prim deltas for the 4 eye params; returns {pid: firstTargetIndex}
+function buildFaceTargets(buf,binOff,json){
+  const hm=humanoidMap(json);
+  if(hm.leftEye==null||hm.rightEye==null)return null;
+  const eL=nodeWorldPos(json,hm.leftEye), eR=nodeWorldPos(json,hm.rightEye);
+  const sigma=0.032, s2=2*sigma*sigma;
+  const out={};
+  (json.meshes||[]).forEach((mesh,mi)=>{
+    const hasTargets=mesh.primitives.some(p=>(p.targets||[]).length);
+    if(!hasTargets)return; // face mesh = the morph-bearing mesh
+    mesh.primitives.forEach((prim,piIdx)=>{
+      const pid=(doc.meshPrims[mi]||[])[piIdx]; if(pid==null)return;
+      const nT=(prim.targets||[]).length;
+      if(nT+FACE_PARAMS.length>64)return;
+      const pos=accF32(buf,binOff,json,prim.attributes.POSITION);
+      const count=pos.length/3;
+      const deltas=FACE_PARAMS.map(()=>new Float32Array(count*3));
+      for(let i=0;i<count;i++){
+        const x=pos[i*3],y=pos[i*3+1],z=pos[i*3+2];
+        const dL=Math.hypot(x-eL[0],y-eL[1],z-eL[2]);
+        const dR=Math.hypot(x-eR[0],y-eR[1],z-eR[2]);
+        const useL=dL<=dR, e=useL?eL:eR, d=useL?dL:dR;
+        const g=Math.exp(-d*d/s2);
+        if(g<0.01)continue;
+        deltas[0][i*3]  =(x-e[0])*g*0.6;            // 横幅
+        deltas[1][i*3+1]=(y-e[1])*g*0.6;            // 縦幅
+        deltas[2][i*3+1]=g*0.012;                   // 高さ
+        deltas[3][i*3]  =(e[0]>=0?1:-1)*g*0.01;     // 距離
+      }
+      out[pid]=nT;
+      out["_dbg_"+pid]=[];
+      deltas.forEach(dd=>{
+        const dp=poolWriteF32(dd);
+        const newCnt=Number(inst.exports.add_morph_target(BigInt(pid),BigInt(dp)));
+        let mx=0; for(let q=0;q<dd.length;q++)mx=Math.max(mx,Math.abs(dd[q]));
+        out["_dbg_"+pid].push({dp,newCnt,mx:+mx.toFixed(4),len:dd.length});
+      });
+    });
+  });
+  return out;
+}
+function applyFaceParam(k,v){
+  if(!doc.faceTi)return;
+  const idx=FACE_PARAMS.indexOf(k); if(idx<0)return;
+  for(const [pid,base] of Object.entries(doc.faceTi)){
+    if(pid.startsWith("_dbg"))continue;   // diagnostic entries, not prim ids
+    inst.exports.set_morph_weight(BigInt(pid),BigInt(base+idx),v);
+    dirty.add(+pid);
+  }
+  scheduleRebuild();
+}
 function put(t,C){const p=Number(inst.exports.__alloc(t.byteLength));new C(mem.buffer,p,t.length).set(t);return p;}
 
 function uploadModel(buf){
@@ -467,7 +578,12 @@ function uploadModel(buf){
     });
   });
   doc.meshPrims=meshPrims;
-  status.textContent=`${n} prims, ${nT} morph targets${doc.skel?", skinned":""} (studio v8)`;
+  doc.faceTi=buildFaceTargets(buf,binOff,json);
+  // Initialize rest-pose skin palettes NOW: any later rebuild_prim (morph,
+  // expressions, face params) runs the skin blend, and an uninitialized
+  // palette is all-zeros — which collapses the mesh to the origin.
+  if(doc.skel)inst.exports.recompute_skin();
+  status.textContent=`${n} prims, ${nT} morph targets${doc.skel?", skinned":""} (studio v9)`;
   return {json,binOff};
 }
 
@@ -507,6 +623,7 @@ function reapplyWeights(){
     const [mi,ti]=key.split(":");
     (doc.meshPrims[mi]||[]).forEach(pid=>{inst.exports.set_morph_weight(BigInt(pid),BigInt(ti),v);dirty.add(pid);});
   }
+  for(const [k,v] of Object.entries(doc.ui.face||{})) if(v)applyFaceParam(k,v);
   scheduleRebuild();
   if(doc.skel){
     let any=false;
@@ -514,6 +631,11 @@ function reapplyWeights(){
       if(!v)continue;
       const p=BODY_PARAMS.find(x=>x.key===k);
       if(p){applyBodyParam(p,v);any=true;}
+    }
+    for(const [k,v] of Object.entries(doc.ui.pose||{})){
+      if(!v)continue;
+      const p=POSE_PARAMS.find(x=>x.key===k);
+      if(p){p.apply(v);any=true;}
     }
     if(any)inst.exports.recompute_skin();
   }
@@ -525,7 +647,7 @@ function openDocument(buf){
   const meta=json.extensions&&json.extensions.VRMC_vrm&&json.extensions.VRMC_vrm.meta;
   doc={originalBuf:buf,json,binOff,
        params:{colors:{},texOverride:{},title:(meta&&meta.name)||""},
-       meshPrims:{},targetNames:{},skel:null,ui:{expr:{},morph:{},body:{}}};
+       meshPrims:{},targetNames:{},skel:null,faceTi:null,ui:{expr:{},morph:{},body:{},face:{},pose:{}}};
   // collect target names
   (json.meshes||[]).forEach((mesh,mi)=>{
     mesh.primitives.forEach(prim=>{
@@ -602,6 +724,20 @@ function buildPanels(){
     });
   }
   if(!bp.children.length)bp.innerHTML='<i style="color:#556">no skeleton / humanoid</i>';
+  // face params
+  const fp=document.getElementById("faceparams");fp.innerHTML="";
+  if(doc.faceTi&&Object.keys(doc.faceTi).length){
+    FACE_PARAMS.forEach(k=>{
+      sliderRow(fp,k,v=>{doc.ui.face[k]=v;applyFaceParam(k,v);},-1);
+    });
+  } else fp.innerHTML='<i style="color:#556">no eye bones</i>';
+  // pose params
+  const pp=document.getElementById("poseparams");pp.innerHTML="";
+  if(doc.skel&&Object.keys(doc.skel.humanoid||{}).length){
+    POSE_PARAMS.forEach(p=>{
+      sliderRow(pp,p.key,v=>{doc.ui.pose[p.key]=v;p.apply(v);scheduleSkin();},-1);
+    });
+  } else pp.innerHTML='<i style="color:#556">no skeleton</i>';
   // expressions
   const ex=document.getElementById("exprs");ex.innerHTML="";
   exprList().forEach(e=>{
@@ -659,6 +795,66 @@ function applyUrlParams(){
     });
     inst.exports.recompute_skin();
   }
+  const pose=q.get("pose");
+  if(pose&&doc&&doc.skel){
+    pose.split(",").forEach(pair=>{
+      const [k,v]=pair.split(":");
+      const p=POSE_PARAMS.find(x=>x.key===k);
+      if(p){doc.ui.pose[k]=parseFloat(v||"1");p.apply(parseFloat(v||"1"));}
+    });
+    inst.exports.recompute_skin();
+  }
+  const face=q.get("face");
+  if(face&&doc&&doc.faceTi){
+    face.split(",").forEach(pair=>{
+      const [k,v]=pair.split(":");
+      doc.ui.face[k]=parseFloat(v||"1");applyFaceParam(k,parseFloat(v||"1"));
+    });
+  }
+  const bg=q.get("bg");
+  if(bg)inst.exports.set_bg(parseInt(bg.slice(0,2),16)/255,parseInt(bg.slice(2,4),16)/255,parseInt(bg.slice(4,6),16)/255);
+  if(q.get("dbg3")&&doc.faceTi){
+    // apply 横幅:1 synchronously to each face prim, then read back work buffers
+    const lines=[];
+    for(const [pidS,base] of Object.entries(doc.faceTi)){
+      if(pidS.startsWith("_dbg"))continue;
+      const pid=+pidS;
+      inst.exports.rebuild_prim(BigInt(pid));
+      const w0=Number(inst.exports.get_prim_work(BigInt(pid)));
+      if(!w0){lines.push(`p${pid}:nowork`);continue;}
+      inst.exports.set_morph_weight(BigInt(pid),BigInt(base),1.0);
+      inst.exports.rebuild_prim(BigInt(pid));
+      // find max |coord| in first 200 verts as sanity
+      const a=new Float32Array(mem.buffer,w0,200*11);
+      let mx=0;
+      for(let i=0;i<200;i++)for(let c=0;c<3;c++)mx=Math.max(mx,Math.abs(a[i*11+c]));
+      lines.push(`p${pid}b${base}m${mx.toFixed(2)}`);
+    }
+    status.textContent="DBG3 "+lines.join(" ");
+    return;
+  }
+  if(q.get("dbg2")&&doc.faceTi){
+    const pid=+Object.keys(doc.faceTi).filter(k=>!k.startsWith("_dbg"))[0];
+    const base=doc.faceTi[pid];
+    // snapshot base verts (vptr unknown to JS — use work after a no-weight rebuild)
+    inst.exports.rebuild_prim(BigInt(pid));
+    const w0=Number(inst.exports.get_prim_work(BigInt(pid)));
+    const before=new Float32Array(mem.buffer.slice(0),w0,12852/3*11).slice();
+    inst.exports.set_morph_weight(BigInt(pid),BigInt(base+0),1.0);  // 横幅
+    inst.exports.rebuild_prim(BigInt(pid));
+    const after=new Float32Array(mem.buffer,w0,12852/3*11);
+    let mx=0,mi=-1;
+    for(let i=0;i<after.length/11;i++){
+      const d=Math.hypot(after[i*11]-before[i*11],after[i*11+1]-before[i*11+1],after[i*11+2]-before[i*11+2]);
+      if(d>mx){mx=d;mi=i;}
+    }
+    status.textContent=`DBG2 pid${pid} work${w0} maxMove=${(mx*100).toFixed(2)}cm @v${mi} pos=(${before[mi*11].toFixed(3)},${before[mi*11+1].toFixed(3)},${before[mi*11+2].toFixed(3)})`;
+  }
+  if(q.get("dbg")&&doc.faceTi){
+    const pids=Object.keys(doc.faceTi).filter(k=>!k.startsWith("_dbg"));
+    const p0=pids[0], d=doc.faceTi["_dbg_"+p0]||[];
+    status.textContent="DBG pid"+p0+" base"+doc.faceTi[p0]+" "+d.map(x=>`p${x.dp}c${x.newCnt}m${x.mx}L${x.len}`).join(" ");
+  }
   const expr=q.get("expr");
   if(expr&&doc){const list=exprList();
     expr.split(",").forEach(pair=>{const [nm,v]=pair.split(":");
@@ -668,6 +864,18 @@ function applyUrlParams(){
     });
   }
 }
+
+// ── view controls (wired once; view-only, not saved) ──
+document.getElementById("bgColor").addEventListener("input",e=>{
+  const h=e.target.value;
+  inst.exports.set_bg(parseInt(h.slice(1,3),16)/255,parseInt(h.slice(3,5),16)/255,parseInt(h.slice(5,7),16)/255);
+});
+document.getElementById("lightAz").addEventListener("input",e=>{
+  const v=+e.target.value;
+  document.getElementById("lightAzV").textContent=v.toFixed(2);
+  const az=Math.PI*v;
+  inst.exports.set_light_dir(Math.sin(az)*0.8+0.35*Math.cos(az),0.7,Math.cos(az)*0.8);
+});
 
 // ── input ──
 function wirePointer(){
