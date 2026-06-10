@@ -37,6 +37,8 @@
   <div id="panel">
     <button class="reset" id="saveVrm" style="width:100%;margin:0 0 4px">💾 Save .vrm</button>
     <div class="slider"><label>Title</label><input id="metaTitle" type="text" style="flex:1;background:#26263a;border:1px solid #3a3a52;color:#cfd;border-radius:4px;padding:2px 6px;font-size:12px"></div>
+    <h2>Colors</h2>
+    <div id="colors"></div>
     <h2>Textures</h2>
     <div id="textures" style="display:flex;flex-wrap:wrap;gap:6px"></div>
     <h2>Expressions</h2>
@@ -224,6 +226,7 @@ function loadVRM(buf){
   currentBuf=buf;
   buildPanel();
   buildTexturePanel(buf,binOff,json);
+  buildColorPanel(json);
   const meta=json.extensions&&json.extensions.VRMC_vrm&&json.extensions.VRMC_vrm.meta;
   document.getElementById("metaTitle").value=(meta&&meta.name)||"";
   status.textContent=`${n} prims, ${nTargets} morph targets (editor v6)`;
@@ -250,6 +253,82 @@ function buildTexturePanel(buf,binOff,json){
       fi.click();
     });
     tp.appendChild(el);
+  });
+}
+
+// ── semantic color groups (VRoid-style 汎用 color params) ──
+// VRoid exports name materials with standard tokens; group them so one picker
+// recolors hair / eyes / skin / clothes on ANY VRoid-family VRM.
+const COLOR_GROUPS=[
+  {key:"髪",     test:n=>/_HAIR/i.test(n)},
+  {key:"瞳",     test:n=>/EyeIris/i.test(n)},
+  {key:"肌",     test:n=>/_SKIN/i.test(n)},
+  {key:"服",     test:n=>/_CLOTH|Onepiece|Tops|Bottoms/i.test(n)},
+  {key:"靴",     test:n=>/Shoes/i.test(n)},
+];
+function groupImages(json,test){
+  const imgs=new Set();
+  (json.materials||[]).forEach(m=>{
+    if(!test(m.name||""))return;
+    const bct=m.pbrMetallicRoughness&&m.pbrMetallicRoughness.baseColorTexture;
+    if(bct)imgs.add(json.textures[bct.index].source);
+  });
+  return [...imgs];
+}
+// hue/sat replace, luminance preserved (keeps shading detail + alpha)
+function recolorImage(buf,binOff,json,imgIdx,hex){
+  return new Promise(res=>{
+    const bv=json.bufferViews[json.images[imgIdx].bufferView];
+    const blob=new Blob([new Uint8Array(buf,binOff+(bv.byteOffset||0),bv.byteLength)]);
+    const im=new Image();
+    im.onload=()=>{
+      const c=document.createElement("canvas");c.width=im.width;c.height=im.height;
+      const g=c.getContext("2d");g.drawImage(im,0,0);
+      const id=g.getImageData(0,0,c.width,c.height),px=id.data;
+      const r=parseInt(hex.slice(0,2),16)/255,gg=parseInt(hex.slice(2,4),16)/255,b=parseInt(hex.slice(4,6),16)/255;
+      // normalize by the texture's average luminance: a pixel at avg maps to
+      // exactly the target colour; shading detail rides as the ratio l/avgL.
+      // Works on dark sources too (e.g. near-black outfits).
+      let suml=0,cnt=0;
+      for(let i=0;i<px.length;i+=4){ if(px[i+3]>8){ suml+=0.299*px[i]+0.587*px[i+1]+0.114*px[i+2]; cnt++; } }
+      const avgL=cnt? (suml/cnt)/255 : 0.5;
+      for(let i=0;i<px.length;i+=4){
+        if(px[i+3]===0)continue;
+        const l=(0.299*px[i]+0.587*px[i+1]+0.114*px[i+2])/255;
+        let k=avgL>0.004?l/avgL:1.0;
+        if(k>1)k=1+(k-1)/(1+0.6*(k-1));   // soft knee: compress highlights
+        let rr=r*k,gg2=gg*k,bb=b*k;
+        const m=Math.max(rr,gg2,bb);
+        if(m>1){rr/=m;gg2/=m;bb/=m;}       // hue-preserving clip (no white-out)
+        px[i]=rr*255;px[i+1]=gg2*255;px[i+2]=bb*255;
+      }
+      g.putImageData(id,0,0);
+      c.toBlob(async bb=>res(new Uint8Array(await bb.arrayBuffer())),"image/png");
+    };
+    im.src=URL.createObjectURL(blob);
+  });
+}
+async function applyGroupColor(test,hex){
+  // locate bin in currentBuf
+  const dv=new DataView(currentBuf);const total=dv.getUint32(8,true);
+  let off=12,binOff=0;
+  while(off+8<=total){const cl=dv.getUint32(off,true),ct=dv.getUint32(off+4,true);off+=8;
+    if(ct===0x004E4942)binOff=off; off+=cl;}
+  const repl={};
+  for(const idx of groupImages(model.json,test))
+    repl[idx]=await recolorImage(currentBuf,binOff,model.json,idx,hex);
+  if(Object.keys(repl).length)applyEdit(null,repl);
+}
+function buildColorPanel(json){
+  const cp=document.getElementById("colors");cp.innerHTML="";
+  COLOR_GROUPS.forEach(grp=>{
+    if(!groupImages(json,grp.test).length)return;
+    const row=document.createElement("div");row.className="slider";
+    const lab=document.createElement("label");lab.textContent=grp.key;
+    const inp=document.createElement("input");inp.type="color";inp.value="#8a6a52";
+    inp.style.cssText="flex:1;height:24px;background:#26263a;border:1px solid #3a3a52;border-radius:4px";
+    inp.addEventListener("change",()=>applyGroupColor(grp.test,inp.value.slice(1)));
+    row.append(lab,inp);cp.appendChild(row);
   });
 }
 
@@ -340,6 +419,12 @@ function applyUrlParams(){
   if(dist){ inst.exports.on_wheel((dist-3.0)/0.003); }
   const ty=parseFloat(q.get("ty")||"0"); // camera target height tweak via drag-up
   if(ty){ inst.exports.on_pointer_down(0,0,0n); inst.exports.on_pointer_move(0,-ty/0.01); inst.exports.on_pointer_up(0,0,0n); }
+  // ?tint=髪:ff66aa — semantic group recolor (headless test)
+  const tint=q.get("tint");
+  if(tint&&model){ const [gk,hex]=tint.split(":");
+    const grp=COLOR_GROUPS.find(g=>g.key===gk);
+    if(grp)applyGroupColor(grp.test,hex);
+  }
   // ?recolor=15:ff3355 — replace image N with a solid-color PNG (headless test)
   const rc=q.get("recolor");
   if(rc&&model){
