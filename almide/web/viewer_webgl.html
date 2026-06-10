@@ -60,6 +60,9 @@
         <h2>ルックプリセット</h2>
         <div id="presets" style="display:flex;flex-wrap:wrap;gap:6px"></div>
         <div class="crow" style="margin-top:6px"><input id="presetName" type="text" placeholder="プリセット名"><button class="clr" id="presetSave" style="color:#6c63ff;font-size:12px">＋保存</button></div>
+        <h2>パーツ</h2>
+        <div class="crow"><label>髪を移植</label><button class="clr" id="hairBtn" style="color:#6c63ff;font-size:12px">VRMを選ぶ…</button>
+          <input id="hairFile" type="file" accept=".vrm,.glb" class="hidden"></div>
         <h2>カラー</h2>
         <div id="colors"></div>
         <h2>テクスチャ <span style="text-transform:none;color:#667">(クリックで差し替え)</span></h2>
@@ -86,6 +89,7 @@
 </div>
 
 <script src="webgl.js"></script>
+<script src="parts.js"></script>
 <script>
 const status=document.getElementById("status");
 window.addEventListener("error",e=>{status.textContent="JS ERROR: "+e.message+" @"+e.lineno;});
@@ -807,6 +811,10 @@ function applyUrlParams(){
   const rd=q.get("rimdbg");
   if(rd&&doc){const r=parseInt(rd.slice(0,2),16)/255,g=parseInt(rd.slice(2,4),16)/255,b=parseInt(rd.slice(4,6),16)/255;
     inst.exports.debug_rim(r,g,b,3.0);}
+  const op=q.get("open");
+  if(op){ fetch(op).then(r=>r.arrayBuffer()).then(b=>{openDocument(b);}); }
+  const hd=q.get("hairdonor");
+  if(hd&&doc){ fetch(hd).then(r=>r.arrayBuffer()).then(doHairTransplant); }
   const bg=q.get("bg");
   if(bg)inst.exports.set_bg(parseInt(bg.slice(0,2),16)/255,parseInt(bg.slice(2,4),16)/255,parseInt(bg.slice(4,6),16)/255);
   if(q.get("dbg3")&&doc.faceTi){
@@ -861,6 +869,19 @@ function applyUrlParams(){
   }
 }
 
+// ── parts transplant ──
+async function doHairTransplant(donorBuf){
+  try{
+    const out=transplantHair(doc.originalBuf,donorBuf);
+    openDocument(out);
+    status.textContent+="  髪を移植しました";
+  }catch(e){ status.textContent="移植エラー: "+e.message; console.error(e); }
+}
+document.getElementById("hairBtn").addEventListener("click",()=>document.getElementById("hairFile").click());
+document.getElementById("hairFile").addEventListener("change",async function(){
+  const f=this.files[0]; if(f&&doc)doHairTransplant(await f.arrayBuffer());
+});
+
 // ── look presets (colors + title), persisted in localStorage ──
 function loadPresets(){ try{return JSON.parse(localStorage.getItem("nendo_presets")||"[]");}catch(e){return [];} }
 function storePresets(ps){ localStorage.setItem("nendo_presets",JSON.stringify(ps)); }
@@ -880,17 +901,35 @@ function renderPresets(){
     el.appendChild(chip);
   });
 }
+function syncSliders(id,map){
+  document.querySelectorAll("#"+id+" .slider").forEach(row=>{
+    const k=row.querySelector("label").textContent;
+    const v=map[k]||0;
+    const inp=row.querySelector("input[type=range]");
+    if(inp){ inp.value=v; const val=row.querySelector(".val"); if(val)val.textContent=(+v).toFixed(2); }
+  });
+}
 function applyPreset(p){
   if(!doc)return;
   doc.params.colors={...(p.colors||{})};
   if(p.title!=null){ doc.params.title=p.title; document.getElementById("metaTitle").value=p.title; }
+  doc.ui.body={...(p.body||{})};
+  doc.ui.face={...(p.face||{})};
+  if(doc.skel){
+    BODY_PARAMS.forEach(bp=>applyBodyParam(bp, doc.ui.body[bp.key]||0)); // 0 = identity reset
+    inst.exports.recompute_skin();
+  }
+  FACE_PARAMS.forEach(k=>applyFaceParam(k, doc.ui.face[k]||0));
+  syncSliders("bodyparams",doc.ui.body);
+  syncSliders("faceparams",doc.ui.face);
   syncColorPanel();
   refresh();
 }
 function savePreset(name){
   if(!doc||!name)return;
   const ps=loadPresets().filter(p=>p.name!==name);
-  ps.push({name, colors:{...doc.params.colors}, title:doc.params.title});
+  ps.push({name, colors:{...doc.params.colors}, title:doc.params.title,
+           body:{...doc.ui.body}, face:{...doc.ui.face}});
   storePresets(ps); renderPresets();
 }
 function syncColorPanel(){
