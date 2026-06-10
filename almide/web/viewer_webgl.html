@@ -57,6 +57,9 @@
     </div>
     <div id="tabbody">
       <div class="tab active" id="tab-look">
+        <h2>ルックプリセット</h2>
+        <div id="presets" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+        <div class="crow" style="margin-top:6px"><input id="presetName" type="text" placeholder="プリセット名"><button class="clr" id="presetSave" style="color:#6c63ff;font-size:12px">＋保存</button></div>
         <h2>カラー</h2>
         <div id="colors"></div>
         <h2>テクスチャ <span style="text-transform:none;color:#667">(クリックで差し替え)</span></h2>
@@ -339,15 +342,33 @@ async function deriveBuf(){
   },repl,bvRepl);
 }
 
-// edits → re-derive → re-upload geometry → re-apply morph weights (UI untouched)
-let deriving=false,pendingDerive=false;
+// Look edits (colors / texture overrides) update TEXTURES IN PLACE — no
+// geometry reload, no white flash. The full deriveBuf is only for saving.
+let deriving=false,pendingDerive=false,appliedImgs=new Set();
 async function refresh(){
   if(deriving){pendingDerive=true;return;}
   deriving=true;
   try{
-    const buf=await deriveBuf();
-    uploadModel(buf);
-    reapplyWeights();
+    const {json,binOff}=glbChunks(doc.originalBuf);
+    const repl={};
+    for(const [i,b] of Object.entries(doc.params.texOverride)) repl[i]=b;
+    for(const grp of COLOR_GROUPS){
+      const hex=doc.params.colors[grp.key]; if(!hex)continue;
+      for(const idx of groupImages(json,grp.test)){
+        const src=repl[idx]!==undefined?repl[idx]:imgBytes(doc.originalBuf,binOff,json,idx);
+        repl[idx]=await recolorBytes(src,hex);
+      }
+    }
+    // touched now ∪ touched before (the latter revert to original pixels)
+    const targets=new Set([...Object.keys(repl),...appliedImgs]);
+    for(const k of targets){
+      const idx=+k;
+      const bytes=repl[k]!==undefined?repl[k]:imgBytes(doc.originalBuf,binOff,json,idx);
+      const ptr=Number(inst.exports.__alloc(bytes.length));
+      new Uint8Array(mem.buffer,ptr,bytes.length).set(bytes);
+      inst.exports.update_image(BigInt(idx),BigInt(ptr),BigInt(bytes.length));
+    }
+    appliedImgs=new Set(Object.keys(repl));
   } finally {
     deriving=false;
     if(pendingDerive){pendingDerive=false;refresh();}
@@ -617,8 +638,10 @@ function openDocument(buf){
       if(names&&!doc.targetNames[mi])doc.targetNames[mi]=names;
     });
   });
+  appliedImgs=new Set();
   uploadModel(buf);
   buildPanels();
+  renderPresets();
   dropEl.classList.remove("active");
 }
 
@@ -777,6 +800,10 @@ function applyUrlParams(){
   if(q.get("bake")&&doc){
     deriveBuf().then(b=>{ openDocument(b); });
   }
+  const psv=q.get("preset_save");
+  if(psv&&doc)savePreset(psv);
+  const pld=q.get("preset");
+  if(pld&&doc){ const p=loadPresets().find(x=>x.name===pld); if(p)applyPreset(p); }
   const bg=q.get("bg");
   if(bg)inst.exports.set_bg(parseInt(bg.slice(0,2),16)/255,parseInt(bg.slice(2,4),16)/255,parseInt(bg.slice(4,6),16)/255);
   if(q.get("dbg3")&&doc.faceTi){
@@ -830,6 +857,51 @@ function applyUrlParams(){
     });
   }
 }
+
+// ── look presets (colors + title), persisted in localStorage ──
+function loadPresets(){ try{return JSON.parse(localStorage.getItem("nendo_presets")||"[]");}catch(e){return [];} }
+function storePresets(ps){ localStorage.setItem("nendo_presets",JSON.stringify(ps)); }
+function renderPresets(){
+  const el=document.getElementById("presets"); el.innerHTML="";
+  const ps=loadPresets();
+  if(!ps.length){ el.innerHTML='<i style="color:#556">保存したルックはここに並びます</i>'; return; }
+  ps.forEach((p,i)=>{
+    const chip=document.createElement("div");
+    chip.style.cssText="display:flex;align-items:center;gap:5px;background:#26263a;border:1px solid #3a3a52;border-radius:14px;padding:3px 8px;cursor:pointer;font-size:12px";
+    const dots=Object.values(p.colors||{}).slice(0,4).map(h=>`<span style="width:10px;height:10px;border-radius:5px;background:#${h};display:inline-block"></span>`).join("");
+    chip.innerHTML=`${dots}<span>${p.name}</span><span style="color:#667" data-del="${i}">×</span>`;
+    chip.addEventListener("click",e=>{
+      if(e.target.dataset.del!=null){ const a=loadPresets(); a.splice(+e.target.dataset.del,1); storePresets(a); renderPresets(); return; }
+      applyPreset(p);
+    });
+    el.appendChild(chip);
+  });
+}
+function applyPreset(p){
+  if(!doc)return;
+  doc.params.colors={...(p.colors||{})};
+  if(p.title!=null){ doc.params.title=p.title; document.getElementById("metaTitle").value=p.title; }
+  syncColorPanel();
+  refresh();
+}
+function savePreset(name){
+  if(!doc||!name)return;
+  const ps=loadPresets().filter(p=>p.name!==name);
+  ps.push({name, colors:{...doc.params.colors}, title:doc.params.title});
+  storePresets(ps); renderPresets();
+}
+function syncColorPanel(){
+  document.querySelectorAll("#colors .crow").forEach(row=>{
+    const key=row.querySelector("label").textContent;
+    const hex=doc.params.colors[key];
+    row.querySelector("input[type=color]").value=hex?("#"+hex):"#888888";
+    row.querySelector(".hex").value=hex?("#"+hex).toUpperCase():"—";
+  });
+}
+document.getElementById("presetSave").addEventListener("click",()=>{
+  const nm=document.getElementById("presetName").value.trim();
+  if(nm){ savePreset(nm); document.getElementById("presetName").value=""; }
+});
 
 // ── view controls (wired once; view-only, not saved) ──
 document.getElementById("bgColor").addEventListener("input",e=>{

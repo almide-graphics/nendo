@@ -418,6 +418,7 @@ effect fn main() -> Unit = {
   let _ = get_node_slot(0 - 1)
   let _ = recompute_world()
   let _ = spring_tick(0.0)
+  let _ = update_image(0 - 1, 0, 0)
 }
 
 pub fn set_aspect(a: Float) -> Int = {
@@ -900,6 +901,14 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
 }
 
 pub fn get_prim_count() -> Int = bytes.read_i32_le(g_n_prims, 0)
+
+// re-upload a loaded image's texture in place (live recolor, no reload)
+pub fn update_image(i: Int, ptr: Int, len: Int) -> Int = {
+  if i >= 0 and i < MAX_IMAGES and len > 0 then {
+    let t = bytes.read_i32_le(g_img_tex, i * 4)
+    if t > 0 then { webgl.tex_image_2d_encoded(t, ptr, len); 0 } else { 0 - 1 }
+  } else { 0 - 1 }
+}
 
 // glTF original node index → skeleton slot (for host UI bone params)
 pub fn get_node_slot(orig: Int) -> Int =
