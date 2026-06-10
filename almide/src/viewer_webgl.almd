@@ -1,0 +1,639 @@
+// nendo VRM viewer — Almide owns the MToon shading via obsid's RAW webgl layer
+// (no three.js, no obsid high-level fixed-function shader). 2-pass MToon:
+//   pass 1 = inverted-hull outline (cull FRONT)
+//   pass 2 = toon ramp + rim + baseColor texture (cull BACK)
+//
+// Host: obsid/host/browser/webgl.js (WebGL 1.0; runs _start then render_frame).
+//
+// Self-contained GLB/VRM loader: parses + builds vertex/index buffers + uploads
+// inline. Array ELEMENT access goes through json.get_path/json.index (NOT
+// json.get_array→list.get_or) to dodge almide/almide#470 — on large real-world
+// glTF JSON, get_array returns a list with correct len but element access traps.
+// Object field access (json.get/get_int/get_string) is unaffected, and
+// list.len(get_array(...)) for counts is fine.
+//
+// almide/almide#457 workaround: host-called exports (render_frame/on_pointer_*/
+// on_wheel) are referenced from main so DCE keeps their bodies. load_vrm_data is
+// a plain `fn` (an exported `effect fn` returns a Result-wrapped value that JS
+// reads as garbage and can trap).
+import obsid.webgl as webgl
+import lumen.mat4 as mat
+import math
+import json
+
+let STRIDE = 44   // pos(3)@0 norm(3)@12 color(3)@24 uv(2)@36
+
+// ── Globals ──
+let g_n_prims = bytes.new(4)
+let MAX_PRIMS = 512
+// per-prim: [vbo:i32][ibo:i32][idx_count:i32][tex:i32][sr:f32][sg:f32][sb:f32]
+//           [alpha_mode:i32][ow:f32][or:f32][og:f32][ob:f32]
+//   alpha_mode: 0=OPAQUE, 1=MASK(cutout), 2=BLEND
+//   ow = MToon outlineWidthFactor in world units (0 = no outline, the default —
+//   three-vrm only draws outlines for materials that opt in)
+let PRIM_STRIDE = 48
+let g_prim_meta = bytes.new(24576)
+let MAX_IMAGES = 256
+let g_img_tex = bytes.new(1024)
+let g_cam = bytes.new(12)   // yaw:f32, pitch:f32, dist:f32
+let g_ptr = bytes.new(12)   // last_x:f32, last_y:f32, dragging:i32
+let g_aspect = bytes.new(4) // viewport aspect (width/height), set by host
+
+// ── webgl state slots ──
+let S_PROG_TOON = 0
+let S_T_MVP = 1
+let S_T_MODEL = 2
+let S_T_EYE = 3
+let S_T_SUN = 4
+let S_T_LIGHT = 5
+let S_T_SHADE = 6
+let S_T_THRESH = 7
+let S_T_FEATHER = 8
+let S_T_TEX = 9
+let S_T_HASTEX = 10
+let S_T_POS = 11
+let S_T_NORM = 12
+let S_T_COL = 13
+let S_T_UV = 14
+let S_PROG_OUTLINE = 15
+let S_O_MVP = 16
+let S_O_WIDTH = 17
+let S_O_COLOR = 18
+let S_O_POS = 19
+let S_O_NORM = 20
+let S_O_UV = 21
+let S_O_TEX = 22
+let S_O_HASTEX = 23
+let S_T_AMODE = 24
+
+let toon_vs = """
+  attribute vec3 a_position;
+  attribute vec3 a_normal;
+  attribute vec3 a_color;
+  attribute vec2 a_uv;
+  uniform mat4 u_mvp;
+  uniform mat4 u_model;
+  varying vec3 v_norm;
+  varying vec3 v_wpos;
+  varying vec3 v_color;
+  varying vec2 v_uv;
+  void main() {
+    vec4 world = u_model * vec4(a_position, 1.0);
+    v_wpos = world.xyz;
+    v_norm = mat3(u_model) * a_normal;
+    v_color = a_color;
+    v_uv = a_uv;
+    gl_Position = u_mvp * vec4(a_position, 1.0);
+  }
+  """
+
+// Faithful three-vrm MToon shading: lit/shade mix via a hard toon ramp.
+//   shading = linearstep(-1+toony, 1-toony, dotNL + shift)   (toony 0.9, shift -0.05)
+//   col = mix(shadeColor, diffuse, shading); col = min(col, diffuse)
+//   shadeColor = shadeColorFactor x baseColor (per-material factor varies:
+//   hair/eyes [1,1,1] = no darkening; skin [0.93,0.62,0.71] = warm shadow).
+//   alphaMode: OPAQUE (no discard, fully opaque — like three-vrm), MASK (cutout),
+//   BLEND (alpha out). A previous discard-on-OPAQUE hack broke hair/face decals.
+let toon_fs = """
+  precision highp float;
+  varying vec3 v_norm;
+  varying vec3 v_color;
+  varying vec2 v_uv;
+  uniform vec3 u_sun_dir;
+  uniform vec3 u_shade_color;   // VRM shadeColorFactor
+  uniform sampler2D u_tex;
+  uniform int u_has_tex;
+  uniform int u_alpha_mode;     // 0 OPAQUE, 1 MASK, 2 BLEND
+  float lstep(float a, float b, float t){ return clamp((t - a) / (b - a), 0.0, 1.0); }
+  void main() {
+    vec4 tex = (u_has_tex == 1) ? texture2D(u_tex, v_uv) : vec4(1.0);
+    float alpha = 1.0;
+    if (u_alpha_mode == 1) { if (tex.a < 0.5) discard; }   // MASK cutout
+    else if (u_alpha_mode == 2) { alpha = tex.a; }         // BLEND
+    vec3 diffuse = v_color * tex.rgb;          // litFactor x baseColor
+    vec3 shade   = u_shade_color * tex.rgb;    // shadeColorFactor x baseColor
+    vec3 n = normalize(v_norm);
+    if (!gl_FrontFacing) n = -n;
+    float dotNL = clamp(dot(n, normalize(u_sun_dir)), -1.0, 1.0);
+    float shading = lstep(-0.1, 0.1, dotNL - 0.05);   // toony 0.9, shift -0.05
+    vec3 col = mix(shade, diffuse, shading);
+    col = min(col, diffuse);
+    gl_FragColor = vec4(col, alpha);
+  }
+  """
+
+let outline_vs = """
+  attribute vec3 a_position;
+  attribute vec3 a_normal;
+  attribute vec2 a_uv;
+  uniform mat4 u_mvp;
+  uniform float u_outline_width;
+  varying vec2 v_uv;
+  void main() {
+    v_uv = a_uv;
+    vec3 p = a_position + normalize(a_normal) * u_outline_width;
+    gl_Position = u_mvp * vec4(p, 1.0);
+  }
+  """
+
+let outline_fs = """
+  precision mediump float;
+  varying vec2 v_uv;
+  uniform vec3 u_outline_color;
+  uniform sampler2D u_tex;
+  uniform int u_has_tex;
+  void main() {
+    // Don't outline alpha-cutout (transparent) regions of textured parts.
+    if (u_has_tex == 1 && texture2D(u_tex, v_uv).a < 0.5) discard;
+    gl_FragColor = vec4(u_outline_color, 1.0);
+  }
+  """
+
+// ── json array helpers (path-based element access; #470 workaround) ──
+
+// Number of elements in parent[key] (list.len on get_array is safe).
+fn arr_len(parent: json.Value, key: String) -> Int =
+  list.len(option.unwrap_or(json.get_array(parent, key), []))
+
+// parent[key][i] via path traversal (avoids the broken get_array list).
+fn arr_at(parent: json.Value, key: String, i: Int) -> json.Value =
+  option.unwrap_or(json.get_path(parent, json.index(json.field(json.root(), key), i)), json.null())
+
+// ── Accessor resolution (returns base_offset, count, comp_size, stride) ──
+fn acc_base(gltf: json.Value, idx: Int) -> Int = {
+  if idx < 0 then 0
+  else {
+    let acc = arr_at(gltf, "accessors", idx)
+    let bv_idx = option.unwrap_or(json.get_int(acc, "bufferView"), 0)
+    let acc_off = option.unwrap_or(json.get_int(acc, "byteOffset"), 0)
+    let bv = arr_at(gltf, "bufferViews", bv_idx)
+    option.unwrap_or(json.get_int(bv, "byteOffset"), 0) + acc_off
+  }
+}
+fn acc_count(gltf: json.Value, idx: Int) -> Int =
+  if idx < 0 then 0 else option.unwrap_or(json.get_int(arr_at(gltf, "accessors", idx), "count"), 0)
+fn acc_comp_size(gltf: json.Value, idx: Int) -> Int = {
+  let ct = option.unwrap_or(json.get_int(arr_at(gltf, "accessors", idx), "componentType"), 5126)
+  if ct == 5120 or ct == 5121 then 1 else if ct == 5122 or ct == 5123 then 2 else 4
+}
+fn acc_stride(gltf: json.Value, idx: Int, components: Int) -> Int = {
+  let acc = arr_at(gltf, "accessors", idx)
+  let bv = arr_at(gltf, "bufferViews", option.unwrap_or(json.get_int(acc, "bufferView"), 0))
+  let bvs = option.unwrap_or(json.get_int(bv, "byteStride"), 0)
+  if bvs > 0 then bvs else components * acc_comp_size(gltf, idx)
+}
+
+// ── Shade color (VRM 0.x MToon _ShadeColor; default cool shadow) ──
+fn shade_c(gltf: json.Value, mat_idx: Int, idx: Int) -> Float = {
+  match json.get(gltf, "extensions") {
+    none => 0.55,
+    some(ext) => match json.get(ext, "VRM") {
+      none => 0.55,
+      some(vrm) => {
+        let prop = arr_at(vrm, "materialProperties", mat_idx)
+        match json.get(prop, "vectorProperties") {
+          none => 0.55,
+          some(vp) => {
+            let arr = arr_at(vp, "_ShadeColor", idx)
+            option.unwrap_or(json.as_float(arr), 0.55)
+          },
+        }
+      },
+    },
+  }
+}
+
+// ── Setup ──
+effect fn main() -> Unit = {
+  let toon = webgl.build_program(toon_vs, toon_fs)
+  webgl.set_state(S_PROG_TOON, toon)
+  webgl.set_state(S_T_MVP, webgl.get_uniform_location(toon, "u_mvp"))
+  webgl.set_state(S_T_MODEL, webgl.get_uniform_location(toon, "u_model"))
+  webgl.set_state(S_T_EYE, webgl.get_uniform_location(toon, "u_eye"))
+  webgl.set_state(S_T_SUN, webgl.get_uniform_location(toon, "u_sun_dir"))
+  webgl.set_state(S_T_LIGHT, webgl.get_uniform_location(toon, "u_light_color"))
+  webgl.set_state(S_T_SHADE, webgl.get_uniform_location(toon, "u_shade_color"))
+  webgl.set_state(S_T_THRESH, webgl.get_uniform_location(toon, "u_shade_threshold"))
+  webgl.set_state(S_T_FEATHER, webgl.get_uniform_location(toon, "u_shade_feather"))
+  webgl.set_state(S_T_TEX, webgl.get_uniform_location(toon, "u_tex"))
+  webgl.set_state(S_T_HASTEX, webgl.get_uniform_location(toon, "u_has_tex"))
+  webgl.set_state(S_T_AMODE, webgl.get_uniform_location(toon, "u_alpha_mode"))
+  webgl.set_state(S_T_POS, webgl.get_attrib_location(toon, "a_position"))
+  webgl.set_state(S_T_NORM, webgl.get_attrib_location(toon, "a_normal"))
+  webgl.set_state(S_T_COL, webgl.get_attrib_location(toon, "a_color"))
+  webgl.set_state(S_T_UV, webgl.get_attrib_location(toon, "a_uv"))
+
+  let outline = webgl.build_program(outline_vs, outline_fs)
+  webgl.set_state(S_PROG_OUTLINE, outline)
+  webgl.set_state(S_O_MVP, webgl.get_uniform_location(outline, "u_mvp"))
+  webgl.set_state(S_O_WIDTH, webgl.get_uniform_location(outline, "u_outline_width"))
+  webgl.set_state(S_O_COLOR, webgl.get_uniform_location(outline, "u_outline_color"))
+  webgl.set_state(S_O_POS, webgl.get_attrib_location(outline, "a_position"))
+  webgl.set_state(S_O_NORM, webgl.get_attrib_location(outline, "a_normal"))
+  webgl.set_state(S_O_UV, webgl.get_attrib_location(outline, "a_uv"))
+  webgl.set_state(S_O_TEX, webgl.get_uniform_location(outline, "u_tex"))
+  webgl.set_state(S_O_HASTEX, webgl.get_uniform_location(outline, "u_has_tex"))
+
+  bytes.set_f32_le(g_aspect, 0, 1.333)
+
+  webgl.enable(webgl.depth_test())
+  webgl.depth_func(webgl.lequal())
+  webgl.enable(webgl.cull_face_cap())
+  webgl.clear_color(0.10, 0.11, 0.14, 1.0)
+
+  bytes.set_f32_le(g_cam, 0, 0.0)
+  bytes.set_f32_le(g_cam, 4, 0.05)
+  bytes.set_f32_le(g_cam, 8, 3.0)
+
+  render_frame(0.0)
+  on_pointer_down(0.0, 0.0, 0)
+  on_pointer_up(0.0, 0.0, 0)
+  on_pointer_move(0.0, 0.0)
+  on_wheel(0.0)
+  let _ = load_vrm_data(bytes.new(0))
+  let _ = get_prim_count()
+  let _ = reset_prims()
+  let _ = add_prim(0, 0, 0, 0, 0, 0, 0.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0)
+  let _ = set_aspect(1.333)
+}
+
+pub fn set_aspect(a: Float) -> Int = {
+  bytes.set_f32_le(g_aspect, 0, a)
+  0
+}
+
+// ── Build one primitive's interleaved vertex buffer (44B) from glTF ──
+fn build_verts(gltf: json.Value, data: Bytes, bin_off: Int, prim: json.Value) -> Bytes = {
+  let attrs = option.unwrap_or(json.get(prim, "attributes"), json.null())
+  let pos_i = option.unwrap_or(json.get_int(attrs, "POSITION"), -1)
+  let vc = acc_count(gltf, pos_i)
+  let verts = bytes.new(vc * STRIDE)
+  if pos_i < 0 then verts
+  else {
+    let pos_base = acc_base(gltf, pos_i)
+    let pos_str = acc_stride(gltf, pos_i, 3)
+    let norm_i = option.unwrap_or(json.get_int(attrs, "NORMAL"), -1)
+    let has_n = norm_i >= 0
+    let norm_base = if has_n then acc_base(gltf, norm_i) else 0
+    let norm_str = if has_n then acc_stride(gltf, norm_i, 3) else 12
+    let uv_i = option.unwrap_or(json.get_int(attrs, "TEXCOORD_0"), -1)
+    let has_uv = uv_i >= 0
+    let uv_base = if has_uv then acc_base(gltf, uv_i) else 0
+    let uv_str = if has_uv then acc_stride(gltf, uv_i, 2) else 8
+    var i = 0
+    while i < vc {
+      let dst = i * STRIDE
+      bytes.copy_from(verts, data, dst, bin_off + pos_base + i * pos_str, 12)
+      if has_n then bytes.copy_from(verts, data, dst + 12, bin_off + norm_base + i * norm_str, 12)
+      else {
+        bytes.set_f32_le(verts, dst + 12, 0.0)
+        bytes.set_f32_le(verts, dst + 16, 1.0)
+        bytes.set_f32_le(verts, dst + 20, 0.0)
+      }
+      bytes.set_f32_le(verts, dst + 24, 1.0)
+      bytes.set_f32_le(verts, dst + 28, 1.0)
+      bytes.set_f32_le(verts, dst + 32, 1.0)
+      if has_uv then bytes.copy_from(verts, data, dst + 36, bin_off + uv_base + i * uv_str, 8)
+      else {
+        bytes.set_f32_le(verts, dst + 36, 0.0)
+        bytes.set_f32_le(verts, dst + 40, 0.0)
+      }
+      i = i + 1
+    }
+    verts
+  }
+}
+
+// ── Build one primitive's u16 index buffer from glTF (u16 or u32 source) ──
+fn build_idx(gltf: json.Value, data: Bytes, bin_off: Int, prim: json.Value) -> Bytes = {
+  let idx_i = option.unwrap_or(json.get_int(prim, "indices"), -1)
+  let ic = acc_count(gltf, idx_i)
+  let idx = bytes.new(ic * 2)
+  if idx_i < 0 then idx
+  else {
+    let base = acc_base(gltf, idx_i)
+    let cs = acc_comp_size(gltf, idx_i)
+    if cs == 2 then { bytes.copy_from(idx, data, 0, bin_off + base, ic * 2) }
+    else {
+      var j = 0
+      while j < ic {
+        bytes.set_u16_le(idx, j * 2, bytes.read_u32_le(data, bin_off + base + j * 4))
+        j = j + 1
+      }
+    }
+    idx
+  }
+}
+
+// ── Load VRM ──
+pub fn load_vrm_data(data: Bytes) -> Int = {
+  if bytes.len(data) < 12 then 0
+  else if bytes.read_u32_le(data, 0) != 0x46546C67 then 0
+  else {
+    let total = bytes.read_u32_le(data, 8)
+    var offset = 12
+    var gltf = json.null()
+    var bin_off = 0
+    while offset + 8 <= int.min(total, bytes.len(data)) {
+      let cl = bytes.read_u32_le(data, offset)
+      let ct = bytes.read_u32_le(data, offset + 4)
+      offset = offset + 8
+      let end = int.min(offset + cl, bytes.len(data))
+      if ct == 0x4E4F534A then {
+        match json.parse(bytes.to_string_lossy(bytes.slice(data, offset, end))) {
+          ok(v) => { gltf = v }, err(_) => {},
+        }
+      } else if ct == 0x004E4942 then { bin_off = offset } else {}
+      offset = end
+    }
+
+    let is_vrm0 = match json.get(gltf, "extensions") {
+      some(ext) => option.is_some(json.get(ext, "VRM")), none => false,
+    }
+
+    // Images → GL textures (handle cached by image index).
+    let n_imgs = int.min(arr_len(gltf, "images"), MAX_IMAGES)
+    var ii = 0
+    while ii < n_imgs {
+      bytes.set_i32_le(g_img_tex, ii * 4, -1)
+      let img = arr_at(gltf, "images", ii)
+      let bv_idx = option.unwrap_or(json.get_int(img, "bufferView"), -1)
+      if bv_idx >= 0 then {
+        let bv = arr_at(gltf, "bufferViews", bv_idx)
+        let bo = option.unwrap_or(json.get_int(bv, "byteOffset"), 0)
+        let bl = option.unwrap_or(json.get_int(bv, "byteLength"), 0)
+        let tex = webgl.create_texture()
+        webgl.tex_image_2d_encoded(tex, bytes.data_ptr(data) + bin_off + bo, bl)
+        bytes.set_i32_le(g_img_tex, ii * 4, tex)
+      } else {}
+      ii = ii + 1
+    }
+
+    let n_meshes = arr_len(gltf, "meshes")
+    var pid = 0
+    var mi = 0
+    while mi < n_meshes {
+      let meshv = arr_at(gltf, "meshes", mi)
+      let n_prims = arr_len(meshv, "primitives")
+      var pi = 0
+      while pi < n_prims {
+        let prim = arr_at(meshv, "primitives", pi)
+        // No arena (heap_save/restore): with leak-all rc_dec, the only remaining
+        // free is heap_restore, which would reclaim json nodes still referenced
+        // by later iterations. The per-prim verts/idx are copied into GL buffers,
+        // so leaking them is fine for a one-shot load.
+        let verts = build_verts(gltf, data, bin_off, prim)
+        let idxb = build_idx(gltf, data, bin_off, prim)
+        let vc = bytes.len(verts) / STRIDE
+        let ic = bytes.len(idxb) / 2
+        if pid < MAX_PRIMS and ic > 0 and vc > 0 then {
+          let vbo = webgl.create_buffer()
+          webgl.bind_buffer(webgl.array_buffer(), vbo)
+          webgl.buffer_data_f32_ptr(webgl.array_buffer(), bytes.data_ptr(verts), vc * STRIDE, webgl.static_draw())
+          let ibo = webgl.create_buffer()
+          webgl.bind_buffer(webgl.element_array_buffer(), ibo)
+          webgl.buffer_data_u16_ptr(webgl.element_array_buffer(), bytes.data_ptr(idxb), ic * 2, webgl.static_draw())
+
+          let mat_i = option.unwrap_or(json.get_int(prim, "material"), -1)
+          var tex_handle = -1
+          var sr = 0.55
+          var sg = 0.50
+          var sb = 0.62
+          if mat_i >= 0 then {
+            let material = arr_at(gltf, "materials", mat_i)
+            match json.get(material, "pbrMetallicRoughness") {
+              some(pbr) => match json.get(pbr, "baseColorTexture") {
+                some(bct) => {
+                  let tex_idx = option.unwrap_or(json.get_int(bct, "index"), -1)
+                  if tex_idx >= 0 then {
+                    let t = arr_at(gltf, "textures", tex_idx)
+                    let src = option.unwrap_or(json.get_int(t, "source"), -1)
+                    if src >= 0 and src < MAX_IMAGES then { tex_handle = bytes.read_i32_le(g_img_tex, src * 4) } else {}
+                  } else {}
+                },
+                none => {},
+              },
+              none => {},
+            }
+            let is_mtoon = match json.get(material, "extensions") {
+              some(ext) => option.is_some(json.get(ext, "VRMC_materials_mtoon")), none => is_vrm0,
+            }
+            if is_mtoon then {
+              sr = shade_c(gltf, mat_i, 0)
+              sg = shade_c(gltf, mat_i, 1)
+              sb = shade_c(gltf, mat_i, 2)
+            } else {}
+          } else {}
+
+          let po = pid * PRIM_STRIDE
+          bytes.set_i32_le(g_prim_meta, po, vbo)
+          bytes.set_i32_le(g_prim_meta, po + 4, ibo)
+          bytes.set_i32_le(g_prim_meta, po + 8, ic)
+          bytes.set_i32_le(g_prim_meta, po + 12, tex_handle)
+          bytes.set_f32_le(g_prim_meta, po + 16, sr)
+          bytes.set_f32_le(g_prim_meta, po + 20, sg)
+          bytes.set_f32_le(g_prim_meta, po + 24, sb)
+          pid = pid + 1
+        } else {}
+        pi = pi + 1
+      }
+      mi = mi + 1
+    }
+    bytes.set_i32_le(g_n_prims, 0, pid)
+    pid
+  }
+}
+
+pub fn get_prim_count() -> Int = bytes.read_i32_le(g_n_prims, 0)
+
+// ── JS-driven primitive upload (interim path; bypasses Almide json.parse #470) ──
+// The host parses the glTF and hands ready geometry; Almide still owns ALL the
+// GL: program/uniforms/passes here + the buffer/texture creation below.
+//   vptr  : raw ptr to vcount*STRIDE bytes of interleaved verts (pos3 norm3 color3 uv2)
+//   iptr  : raw ptr to icount*2 bytes of u16 indices
+//   img_* : encoded base-color image bytes (img_len 0 = untextured)
+pub fn reset_prims() -> Int = {
+  bytes.set_i32_le(g_n_prims, 0, 0)
+  0
+}
+
+pub fn add_prim(vptr: Int, vcount: Int, iptr: Int, icount: Int,
+                img_ptr: Int, img_len: Int, sr: Float, sg: Float, sb: Float,
+                alpha_mode: Int, ow: Float, ocr: Float, ocg: Float, ocb: Float) -> Int = {
+  let pid = bytes.read_i32_le(g_n_prims, 0)
+  if pid >= MAX_PRIMS or icount <= 0 or vcount <= 0 then pid
+  else {
+    let vbo = webgl.create_buffer()
+    webgl.bind_buffer(webgl.array_buffer(), vbo)
+    webgl.buffer_data_f32_ptr(webgl.array_buffer(), vptr, vcount * STRIDE, webgl.static_draw())
+    let ibo = webgl.create_buffer()
+    webgl.bind_buffer(webgl.element_array_buffer(), ibo)
+    webgl.buffer_data_u16_ptr(webgl.element_array_buffer(), iptr, icount * 2, webgl.static_draw())
+    var tex = -1
+    if img_len > 0 then {
+      let t = webgl.create_texture()
+      webgl.tex_image_2d_encoded(t, img_ptr, img_len)
+      tex = t
+    } else {}
+    let po = pid * PRIM_STRIDE
+    bytes.set_i32_le(g_prim_meta, po, vbo)
+    bytes.set_i32_le(g_prim_meta, po + 4, ibo)
+    bytes.set_i32_le(g_prim_meta, po + 8, icount)
+    bytes.set_i32_le(g_prim_meta, po + 12, tex)
+    bytes.set_f32_le(g_prim_meta, po + 16, sr)
+    bytes.set_f32_le(g_prim_meta, po + 20, sg)
+    bytes.set_f32_le(g_prim_meta, po + 24, sb)
+    bytes.set_i32_le(g_prim_meta, po + 28, alpha_mode)
+    bytes.set_f32_le(g_prim_meta, po + 32, ow)
+    bytes.set_f32_le(g_prim_meta, po + 36, ocr)
+    bytes.set_f32_le(g_prim_meta, po + 40, ocg)
+    bytes.set_f32_le(g_prim_meta, po + 44, ocb)
+    bytes.set_i32_le(g_n_prims, 0, pid + 1)
+    pid + 1
+  }
+}
+
+// ── Camera ──
+fn eye_pos(axis: Int) -> Float = {
+  let yaw = bytes.read_f32_le(g_cam, 0)
+  let pitch = bytes.read_f32_le(g_cam, 4)
+  let dist = bytes.read_f32_le(g_cam, 8)
+  let cp = math.cos(pitch)
+  if axis == 0 then dist * cp * math.sin(yaw)
+  else if axis == 1 then 1.0 + dist * math.sin(pitch)
+  else dist * cp * math.cos(yaw)
+}
+
+fn bind_attribs(pos_loc: Int, norm_loc: Int, col_loc: Int, uv_loc: Int, with_extra: Bool) -> Unit = {
+  webgl.vertex_attrib_pointer(pos_loc, 3, webgl.gl_float(), 0, STRIDE, 0)
+  webgl.enable_vertex_attrib_array(pos_loc)
+  webgl.vertex_attrib_pointer(norm_loc, 3, webgl.gl_float(), 0, STRIDE, 12)
+  webgl.enable_vertex_attrib_array(norm_loc)
+  if with_extra then {
+    webgl.vertex_attrib_pointer(col_loc, 3, webgl.gl_float(), 0, STRIDE, 24)
+    webgl.enable_vertex_attrib_array(col_loc)
+    webgl.vertex_attrib_pointer(uv_loc, 2, webgl.gl_float(), 0, STRIDE, 36)
+    webgl.enable_vertex_attrib_array(uv_loc)
+  } else {}
+}
+
+fn draw_prim_toon(po: Int) -> Unit = {
+  webgl.uniform3f(webgl.get_state(S_T_SHADE),
+    bytes.read_f32_le(g_prim_meta, po + 16),
+    bytes.read_f32_le(g_prim_meta, po + 20),
+    bytes.read_f32_le(g_prim_meta, po + 24))
+  webgl.uniform1i(webgl.get_state(S_T_AMODE), bytes.read_i32_le(g_prim_meta, po + 28))
+  let tex = bytes.read_i32_le(g_prim_meta, po + 12)
+  if tex >= 0 then {
+    webgl.active_texture(webgl.texture0())
+    webgl.bind_texture(webgl.texture_2d(), tex)
+    webgl.uniform1i(webgl.get_state(S_T_HASTEX), 1)
+  } else { webgl.uniform1i(webgl.get_state(S_T_HASTEX), 0) }
+  webgl.bind_buffer(webgl.array_buffer(), bytes.read_i32_le(g_prim_meta, po))
+  bind_attribs(webgl.get_state(S_T_POS), webgl.get_state(S_T_NORM), webgl.get_state(S_T_COL), webgl.get_state(S_T_UV), true)
+  webgl.bind_buffer(webgl.element_array_buffer(), bytes.read_i32_le(g_prim_meta, po + 4))
+  webgl.draw_elements(webgl.triangles(), bytes.read_i32_le(g_prim_meta, po + 8), webgl.unsigned_short(), 0)
+}
+
+pub effect fn render_frame(time: Float) -> Unit = {
+  webgl.clear(webgl.color_buffer_bit() + webgl.depth_buffer_bit())
+  let n = bytes.read_i32_le(g_n_prims, 0)
+  let ex = eye_pos(0)
+  let ey = eye_pos(1)
+  let ez = eye_pos(2)
+  let view = mat.look_at(ex, ey, ez, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0)
+  let proj = mat.perspective(0.8, bytes.read_f32_le(g_aspect, 0), 0.05, 100.0)
+  let mvp = mat.multiply(proj, view)
+  let model = mat.identity()
+
+  // Outline pass — ONLY for materials that opt in (MToon outlineWidthFactor>0),
+  // with the material's own width and color, like three-vrm. A previous version
+  // forced a wide dark shell onto every prim, which painted black patches over
+  // bangs/eyes (their shells expand toward the camera).
+  webgl.use_program(webgl.get_state(S_PROG_OUTLINE))
+  webgl.enable(webgl.cull_face_cap())
+  webgl.cull_face(webgl.front())
+  webgl.uniform_matrix4fv(webgl.get_state(S_O_MVP), mvp)
+  webgl.uniform1i(webgl.get_state(S_O_TEX), 0)
+  var i = 0
+  while i < n {
+    let po = i * PRIM_STRIDE
+    let ow = bytes.read_f32_le(g_prim_meta, po + 32)
+    if ow > 0.0 and bytes.read_i32_le(g_prim_meta, po + 28) != 2 then {
+      webgl.uniform1f(webgl.get_state(S_O_WIDTH), ow)
+      webgl.uniform3f(webgl.get_state(S_O_COLOR),
+        bytes.read_f32_le(g_prim_meta, po + 36),
+        bytes.read_f32_le(g_prim_meta, po + 40),
+        bytes.read_f32_le(g_prim_meta, po + 44))
+      webgl.bind_buffer(webgl.array_buffer(), bytes.read_i32_le(g_prim_meta, po))
+      webgl.vertex_attrib_pointer(webgl.get_state(S_O_POS), 3, webgl.gl_float(), 0, STRIDE, 0)
+      webgl.enable_vertex_attrib_array(webgl.get_state(S_O_POS))
+      webgl.vertex_attrib_pointer(webgl.get_state(S_O_NORM), 3, webgl.gl_float(), 0, STRIDE, 12)
+      webgl.enable_vertex_attrib_array(webgl.get_state(S_O_NORM))
+      webgl.vertex_attrib_pointer(webgl.get_state(S_O_UV), 2, webgl.gl_float(), 0, STRIDE, 36)
+      webgl.enable_vertex_attrib_array(webgl.get_state(S_O_UV))
+      let tex = bytes.read_i32_le(g_prim_meta, po + 12)
+      if tex >= 0 then {
+        webgl.active_texture(webgl.texture0())
+        webgl.bind_texture(webgl.texture_2d(), tex)
+        webgl.uniform1i(webgl.get_state(S_O_HASTEX), 1)
+      } else { webgl.uniform1i(webgl.get_state(S_O_HASTEX), 0) }
+      webgl.bind_buffer(webgl.element_array_buffer(), bytes.read_i32_le(g_prim_meta, po + 4))
+      webgl.draw_elements(webgl.triangles(), bytes.read_i32_le(g_prim_meta, po + 8), webgl.unsigned_short(), 0)
+    } else {}
+    i = i + 1
+  }
+
+  webgl.use_program(webgl.get_state(S_PROG_TOON))
+  // VRM materials are overwhelmingly double-sided — render both faces (no cull)
+  // so thin geometry (hair cards, limb seams) doesn't drop backfaces.
+  webgl.disable(webgl.cull_face_cap())
+  webgl.uniform_matrix4fv(webgl.get_state(S_T_MVP), mvp)
+  webgl.uniform_matrix4fv(webgl.get_state(S_T_MODEL), model)
+  webgl.uniform3f(webgl.get_state(S_T_EYE), ex, ey, ez)
+  webgl.uniform3f(webgl.get_state(S_T_SUN), 0.35, 0.7, 0.5)
+  webgl.uniform3f(webgl.get_state(S_T_LIGHT), 1.0, 0.97, 0.92)
+  webgl.uniform1f(webgl.get_state(S_T_THRESH), 0.55)
+  webgl.uniform1f(webgl.get_state(S_T_FEATHER), 0.03)
+  webgl.uniform1i(webgl.get_state(S_T_TEX), 0)
+  // Opaque + cutout first.
+  var k = 0
+  while k < n {
+    let po = k * PRIM_STRIDE
+    if bytes.read_i32_le(g_prim_meta, po + 28) != 2 then draw_prim_toon(po) else {}
+    k = k + 1
+  }
+  // Blend decals last (face mouth/eyes/blush), with alpha blending.
+  webgl.enable(webgl.blend())
+  webgl.blend_func(webgl.src_alpha(), webgl.one_minus_src_alpha())
+  var kb = 0
+  while kb < n {
+    let po = kb * PRIM_STRIDE
+    if bytes.read_i32_le(g_prim_meta, po + 28) == 2 then draw_prim_toon(po) else {}
+    kb = kb + 1
+  }
+  webgl.disable(webgl.blend())
+}
+
+// ── Input (orbit) ──
+pub effect fn on_pointer_down(x: Float, y: Float, button: Int) -> Unit = {
+  bytes.set_f32_le(g_ptr, 0, x)
+  bytes.set_f32_le(g_ptr, 4, y)
+  bytes.set_i32_le(g_ptr, 8, 1)
+}
+pub effect fn on_pointer_up(x: Float, y: Float, button: Int) -> Unit = {
+  bytes.set_i32_le(g_ptr, 8, 0)
+}
+pub effect fn on_pointer_move(x: Float, y: Float) -> Unit = {
+  if bytes.read_i32_le(g_ptr, 8) == 1 then {
+    let dx = x - bytes.read_f32_le(g_ptr, 0)
+    let dy = y - bytes.read_f32_le(g_ptr, 4)
+    bytes.set_f32_le(g_cam, 0, bytes.read_f32_le(g_cam, 0) - dx * 0.01)
+    bytes.set_f32_le(g_cam, 4, float.clamp(bytes.read_f32_le(g_cam, 4) + dy * 0.01, -1.4, 1.4))
+    bytes.set_f32_le(g_ptr, 0, x)
+    bytes.set_f32_le(g_ptr, 4, y)
+  } else {}
+}
+pub effect fn on_wheel(delta: Float) -> Unit = {
+  bytes.set_f32_le(g_cam, 8, float.clamp(bytes.read_f32_le(g_cam, 8) + delta * 0.003, 0.4, 20.0))
+}
