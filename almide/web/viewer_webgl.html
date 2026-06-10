@@ -2,156 +2,269 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>nendo — VRM viewer (Almide MToon via raw obsid.webgl)</title>
+<title>nendo studio — Almide MToon VRM editor</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
-  html,body { height:100%; overflow:hidden; background:#14141c; color:#cfd; font:13px/1.5 -apple-system,system-ui,sans-serif; touch-action:none; }
-  canvas { display:block; width:100vw; height:100vh; }
-  #drop { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; z-index:10; pointer-events:none; }
+  html,body { height:100%; overflow:hidden; background:#14141c; color:#cfd; font:13px/1.5 -apple-system,system-ui,sans-serif; }
+  #wrap { display:flex; height:100vh; }
+  #view { flex:1; position:relative; touch-action:none; }
+  canvas { display:block; width:100%; height:100%; }
+  #panel { width:300px; background:#1b1b26; border-left:1px solid #2a2a3a; overflow-y:auto; padding:12px; }
+  #panel h2 { font-size:12px; color:#8a8aa0; text-transform:uppercase; letter-spacing:.08em; margin:14px 0 6px; }
+  .slider { display:flex; align-items:center; gap:8px; margin:3px 0; }
+  .slider label { width:110px; font-size:12px; color:#aab; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .slider input[type=range] { flex:1; accent-color:#6c63ff; }
+  .slider span { width:34px; text-align:right; font-family:monospace; font-size:11px; color:#7c7; }
+  details summary { cursor:pointer; color:#8a8aa0; font-size:12px; margin:10px 0 4px; }
+  #drop { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; z-index:10; pointer-events:none; }
   #drop.active { background:rgba(0,0,0,.6); pointer-events:auto; }
-  #label { border:2px dashed #444; border-radius:14px; padding:36px 48px; color:#8a8aa0; text-align:center; pointer-events:auto; cursor:pointer; }
+  #label { border:2px dashed #444; border-radius:14px; padding:28px 40px; color:#8a8aa0; text-align:center; pointer-events:auto; cursor:pointer; }
   #label:hover { border-color:#6c63ff; color:#cfd; }
-  #status { position:fixed; left:12px; bottom:12px; font-family:monospace; color:#7c7; z-index:11; }
+  #status { position:absolute; left:12px; bottom:10px; font-family:monospace; font-size:11px; color:#7c7; z-index:11; }
   .hidden { display:none !important; }
+  button.reset { margin:8px 0; padding:4px 10px; background:#26263a; color:#aab; border:1px solid #3a3a52; border-radius:6px; cursor:pointer; font-size:12px; }
+  button.reset:hover { color:#fff; border-color:#6c63ff; }
 </style>
 </head>
 <body>
-  <canvas id="canvas" width="1000" height="750"></canvas>
-  <div id="drop"><div id="label">Drop a .vrm / .glb file<br><small>Almide owns the MToon shading; JS only parses glTF (interim, #470)</small>
-    <input id="file" type="file" accept=".vrm,.glb" class="hidden"></div></div>
-  <div id="status">loading wasm…</div>
+<div id="wrap">
+  <div id="view">
+    <canvas id="canvas"></canvas>
+    <div id="drop"><div id="label">Drop a .vrm / .glb file<br><small>Almide owns MToon shading + morph math; JS parses glTF (interim, #470)</small>
+      <input id="file" type="file" accept=".vrm,.glb" class="hidden"></div></div>
+    <div id="status">loading wasm…</div>
+  </div>
+  <div id="panel">
+    <h2>Expressions</h2>
+    <div id="exprs"><i style="color:#556">load a VRM…</i></div>
+    <button class="reset" id="resetExpr">Reset all</button>
+    <details><summary>Raw morph targets</summary><div id="morphs"></div></details>
+  </div>
+</div>
 
-  <script src="webgl.js"></script>
-  <script>
-  const status = document.getElementById("status");
-  const dropEl = document.getElementById("drop");
-  const fileEl = document.getElementById("file");
-  let inst = null, mem = null;
+<script src="webgl.js"></script>
+<script>
+const status = document.getElementById("status");
+const dropEl = document.getElementById("drop");
+const fileEl = document.getElementById("file");
+let inst=null, mem=null;
 
-  // Size the drawing buffer to the window (× dpr) BEFORE the GL context is
-  // created, so the default viewport + projection aspect match → no squish.
-  const cv = document.getElementById("canvas");
-  const dpr = window.devicePixelRatio || 1;
-  cv.width  = Math.round(window.innerWidth  * dpr);
-  cv.height = Math.round(window.innerHeight * dpr);
+// ── boot ──
+const cv = document.getElementById("canvas");
+const view = document.getElementById("view");
+const dpr = window.devicePixelRatio||1;
+cv.width  = Math.round(view.clientWidth*dpr);
+cv.height = Math.round(view.clientHeight*dpr);
 
-  AlmideWebGL.load("viewer_webgl.wasm", "canvas").then((i) => {
-    inst = i; mem = i.exports.memory;
-    inst.exports.set_aspect(window.innerWidth / window.innerHeight);
-    status.textContent = "ready (shader v4: per-material outline) — drop a VRM";
-    wirePointer();
-    // Auto-load a bundled sample so an avatar shows immediately (optional).
-    fetch("sample.vrm").then(r => r.ok ? r.arrayBuffer() : Promise.reject())
-      .then(loadVRM).then(()=>{
-        // ?yaw=3.14 etc. for headless view checks (simulated drag).
-        const yaw = parseFloat(new URLSearchParams(location.search).get("yaw")||"0");
-        if (yaw) { inst.exports.on_pointer_down(0,0,0n); inst.exports.on_pointer_move(-yaw/0.01,0); inst.exports.on_pointer_up(0,0,0n); }
-      }).catch(()=>{});
-  }).catch((e)=>{ status.textContent = "wasm error: "+e.message; console.error(e); });
+AlmideWebGL.load("viewer_webgl.wasm","canvas").then((i)=>{
+  inst=i; mem=i.exports.memory;
+  inst.exports.set_aspect(view.clientWidth/view.clientHeight);
+  status.textContent="ready (editor v5) — drop a VRM";
+  wirePointer();
+  fetch("sample.vrm").then(r=>r.ok?r.arrayBuffer():Promise.reject())
+    .then(loadVRM).then(applyUrlParams).catch(()=>{});
+}).catch(e=>{ status.textContent="wasm error: "+e.message; console.error(e); });
 
-  const compSize = (ct)=> ct===5126||ct===5125?4 : ct===5123||ct===5122?2 : 1;
-  const numComp  = (t)=> ({SCALAR:1,VEC2:2,VEC3:3,VEC4:4,MAT4:16})[t];
+// ── glTF helpers ──
+const compSize=ct=>ct===5126||ct===5125?4:ct===5123||ct===5122?2:1;
+const numComp=t=>({SCALAR:1,VEC2:2,VEC3:3,VEC4:4,MAT4:16})[t];
+function accF32(buf,binOff,json,idx){
+  const a=json.accessors[idx],bv=json.bufferViews[a.bufferView];
+  const base=binOff+(bv.byteOffset||0)+(a.byteOffset||0),nc=numComp(a.type);
+  const st=bv.byteStride||(nc*compSize(a.componentType));
+  const d=new DataView(buf),o=new Float32Array(a.count*nc);
+  for(let i=0;i<a.count;i++)for(let c=0;c<nc;c++)o[i*nc+c]=d.getFloat32(base+i*st+c*4,true);
+  return o;
+}
+function accIdx(buf,binOff,json,idx){
+  const a=json.accessors[idx],bv=json.bufferViews[a.bufferView];
+  const base=binOff+(bv.byteOffset||0)+(a.byteOffset||0),ct=a.componentType;
+  const d=new DataView(buf),o=new Uint16Array(a.count);
+  for(let i=0;i<a.count;i++)o[i]=ct===5125?d.getUint32(base+i*4,true):ct===5123?d.getUint16(base+i*2,true):d.getUint8(base+i);
+  return o;
+}
+function matTexBytes(buf,binOff,json,mi){
+  const m=json.materials&&json.materials[mi]; if(!m)return null;
+  const bct=m.pbrMetallicRoughness&&m.pbrMetallicRoughness.baseColorTexture; if(!bct)return null;
+  const img=json.images[json.textures[bct.index].source];
+  if(img.bufferView==null)return null;
+  const bv=json.bufferViews[img.bufferView];
+  return new Uint8Array(buf,binOff+(bv.byteOffset||0),bv.byteLength);
+}
+function shade(json,mi){
+  const m=json.materials&&json.materials[mi];
+  const mt=m&&m.extensions&&m.extensions.VRMC_materials_mtoon;
+  return (mt&&mt.shadeColorFactor)||[0.9,0.9,0.95];
+}
+function alphaMode(json,mi){
+  const mo=json.materials&&json.materials[mi]&&json.materials[mi].alphaMode;
+  return mo==="BLEND"?2:mo==="MASK"?1:0;
+}
+function outline(json,mi){
+  const m=json.materials&&json.materials[mi];
+  const mt=m&&m.extensions&&m.extensions.VRMC_materials_mtoon;
+  if(!mt||!mt.outlineWidthMode||mt.outlineWidthMode==="none")return [0,0,0,0];
+  const c=mt.outlineColorFactor||[0,0,0];
+  return [mt.outlineWidthFactor||0,c[0],c[1],c[2]];
+}
+function buildVerts(pos,norm,uv,count,out){
+  for(let i=0;i<count;i++){const o=i*11;
+    out[o]=pos[i*3];out[o+1]=pos[i*3+1];out[o+2]=pos[i*3+2];
+    if(norm){out[o+3]=norm[i*3];out[o+4]=norm[i*3+1];out[o+5]=norm[i*3+2];}else{out[o+3]=0;out[o+4]=1;out[o+5]=0;}
+    out[o+6]=1;out[o+7]=1;out[o+8]=1;
+    if(uv){out[o+9]=uv[i*2];out[o+10]=uv[i*2+1];}else{out[o+9]=0;out[o+10]=0;}
+  }
+}
+function poolWriteF32(arr){
+  const p=Number(inst.exports.pool_alloc(BigInt(arr.length*4)));
+  if(!p){ console.warn("pool exhausted"); return 0; }
+  new Float32Array(mem.buffer,p,arr.length).set(arr);
+  return p;
+}
+function put(t,C){ const p=Number(inst.exports.__alloc(t.byteLength)); new C(mem.buffer,p,t.length).set(t); return p; }
 
-  function accF32(buf, binOff, json, idx) {
-    const a=json.accessors[idx], bv=json.bufferViews[a.bufferView];
-    const base=binOff+(bv.byteOffset||0)+(a.byteOffset||0), nc=numComp(a.type);
-    const stride=bv.byteStride||(nc*compSize(a.componentType));
-    const dv=new DataView(buf), out=new Float32Array(a.count*nc);
-    for(let i=0;i<a.count;i++) for(let c=0;c<nc;c++) out[i*nc+c]=dv.getFloat32(base+i*stride+c*4,true);
-    return out;
-  }
-  function accIdx(buf, binOff, json, idx) {
-    const a=json.accessors[idx], bv=json.bufferViews[a.bufferView];
-    const base=binOff+(bv.byteOffset||0)+(a.byteOffset||0), ct=a.componentType;
-    const dv=new DataView(buf), out=new Uint16Array(a.count);
-    for(let i=0;i<a.count;i++) out[i]= ct===5125?dv.getUint32(base+i*4,true) : ct===5123?dv.getUint16(base+i*2,true) : dv.getUint8(base+i);
-    return out;
-  }
-  function matTexBytes(buf, binOff, json, matIdx) {
-    const m=json.materials&&json.materials[matIdx]; if(!m) return null;
-    const bct=m.pbrMetallicRoughness&&m.pbrMetallicRoughness.baseColorTexture; if(!bct) return null;
-    const tex=json.textures[bct.index]; const img=json.images[tex.source];
-    if(img.bufferView==null) return null;
-    const bv=json.bufferViews[img.bufferView];
-    return new Uint8Array(buf, binOff+(bv.byteOffset||0), bv.byteLength);
-  }
-  function shade(json, matIdx) {
-    const m=json.materials&&json.materials[matIdx];
-    const mt=m&&m.extensions&&m.extensions.VRMC_materials_mtoon;
-    if(mt&&mt.shadeColorFactor) return mt.shadeColorFactor;
-    return [0.9,0.9,0.95];
-  }
-  function alphaMode(json, matIdx) {
-    const m=json.materials&&json.materials[matIdx];
-    const mo=m&&m.alphaMode;
-    return mo==="BLEND"?2 : mo==="MASK"?1 : 0;
-  }
-  // MToon outline: only materials that opt in get a shell (three-vrm semantics).
-  function outline(json, matIdx) {
-    const m=json.materials&&json.materials[matIdx];
-    const mt=m&&m.extensions&&m.extensions.VRMC_materials_mtoon;
-    if(!mt || !mt.outlineWidthMode || mt.outlineWidthMode==="none") return [0,0,0,0];
-    const w=mt.outlineWidthFactor||0;
-    const c=mt.outlineColorFactor||[0,0,0];
-    return [w, c[0], c[1], c[2]];
-  }
-  function buildVerts(pos,norm,uv,count){
-    const v=new Float32Array(count*11);
-    for(let i=0;i<count;i++){ const o=i*11;
-      v[o]=pos[i*3]; v[o+1]=pos[i*3+1]; v[o+2]=pos[i*3+2];
-      if(norm){v[o+3]=norm[i*3];v[o+4]=norm[i*3+1];v[o+5]=norm[i*3+2];}else{v[o+3]=0;v[o+4]=1;v[o+5]=0;}
-      v[o+6]=1;v[o+7]=1;v[o+8]=1;
-      if(uv){v[o+9]=uv[i*2];v[o+10]=uv[i*2+1];}else{v[o+9]=0;v[o+10]=0;}
-    }
-    return v;
-  }
-  function put(typed, ctor){
-    const p=Number(inst.exports.__alloc(typed.byteLength));
-    new ctor(mem.buffer, p, typed.length).set(typed);
-    return p;
-  }
-  function loadVRM(buf){
-    const dv=new DataView(buf);
-    if(dv.getUint32(0,true)!==0x46546C67){ status.textContent="not a GLB/VRM"; return; }
-    const total=dv.getUint32(8,true);
-    let off=12, jsonStr=null, binOff=0;
-    while(off+8<=total){ const cl=dv.getUint32(off,true), ct=dv.getUint32(off+4,true); off+=8;
-      if(ct===0x4E4F534A) jsonStr=new TextDecoder().decode(new Uint8Array(buf,off,cl));
-      else if(ct===0x004E4942) binOff=off; off+=cl; }
-    const json=JSON.parse(jsonStr);
-    inst.exports.reset_prims();
-    let n=0;
-    for(const mesh of json.meshes||[]) for(const prim of mesh.primitives||[]){
-      const a=prim.attributes; if(a.POSITION==null||prim.indices==null) continue;
+// ── model state for the editor ──
+let model = null;  // { json, meshPrims: meshIdx→[pid], targetNames: meshIdx→[names], dirty:Set }
+
+function loadVRM(buf){
+  const dv=new DataView(buf);
+  if(dv.getUint32(0,true)!==0x46546C67){ status.textContent="not a GLB/VRM"; return; }
+  const total=dv.getUint32(8,true);
+  let off=12,jsonStr=null,binOff=0;
+  while(off+8<=total){const cl=dv.getUint32(off,true),ct=dv.getUint32(off+4,true);off+=8;
+    if(ct===0x4E4F534A)jsonStr=new TextDecoder().decode(new Uint8Array(buf,off,cl));
+    else if(ct===0x004E4942)binOff=off; off+=cl;}
+  const json=JSON.parse(jsonStr);
+  inst.exports.reset_prims(); inst.exports.pool_reset();
+  const meshPrims={}, targetNames={};
+  let n=0, nTargets=0;
+  json.meshes&&json.meshes.forEach((mesh,mi)=>{
+    meshPrims[mi]=[];
+    mesh.primitives.forEach((prim)=>{
+      const a=prim.attributes; if(a.POSITION==null||prim.indices==null)return;
       const count=json.accessors[a.POSITION].count;
-      const verts=buildVerts(accF32(buf,binOff,json,a.POSITION),
-                             a.NORMAL!=null?accF32(buf,binOff,json,a.NORMAL):null,
-                             a.TEXCOORD_0!=null?accF32(buf,binOff,json,a.TEXCOORD_0):null, count);
+      const verts=new Float32Array(count*11);
+      buildVerts(accF32(buf,binOff,json,a.POSITION),
+                 a.NORMAL!=null?accF32(buf,binOff,json,a.NORMAL):null,
+                 a.TEXCOORD_0!=null?accF32(buf,binOff,json,a.TEXCOORD_0):null,count,verts);
+      const vp=poolWriteF32(verts); if(!vp)return;
       const idx=accIdx(buf,binOff,json,prim.indices);
+      const ip=put(idx,Uint16Array);
       const img=matTexBytes(buf,binOff,json,prim.material);
-      const sc=shade(json,prim.material);
-      const vp=put(verts,Float32Array), ip=put(idx,Uint16Array);
-      let imgp=0,imgl=0; if(img){ imgl=img.length; imgp=put(img,Uint8Array); }
-      const ol=outline(json,prim.material);
-      inst.exports.add_prim(BigInt(vp),BigInt(count),BigInt(ip),BigInt(idx.length),BigInt(imgp),BigInt(imgl),sc[0],sc[1],sc[2],BigInt(alphaMode(json,prim.material)),ol[0],ol[1],ol[2],ol[3]);
-      n++;
-    }
-    status.textContent = `${n} primitives (shader v4) — drag to orbit, wheel to zoom`;
-    dropEl.classList.remove("active");
+      let imgp=0,imgl=0; if(img){imgl=img.length;imgp=put(img,Uint8Array);}
+      const sc=shade(json,prim.material), ol=outline(json,prim.material);
+      const pidNew=Number(inst.exports.add_prim(BigInt(vp),BigInt(count),BigInt(ip),BigInt(idx.length),
+        BigInt(imgp),BigInt(imgl),sc[0],sc[1],sc[2],BigInt(alphaMode(json,prim.material)),ol[0],ol[1],ol[2],ol[3]))-1;
+      meshPrims[mi].push(pidNew); n++;
+      // morph targets (non-sparse POSITION deltas)
+      (prim.targets||[]).forEach((t)=>{
+        if(t.POSITION==null){ inst.exports.add_morph_target(BigInt(pidNew),0n); return; }
+        const acc=json.accessors[t.POSITION];
+        if(acc.sparse){ console.warn("sparse morph target skipped"); inst.exports.add_morph_target(BigInt(pidNew),0n); return; }
+        const deltas=accF32(buf,binOff,json,t.POSITION);
+        const dp=poolWriteF32(deltas);
+        inst.exports.add_morph_target(BigInt(pidNew),BigInt(dp));
+        nTargets++;
+      });
+      const names=(prim.extras&&prim.extras.targetNames)||(mesh.extras&&mesh.extras.targetNames);
+      if(names && !targetNames[mi]) targetNames[mi]=names;
+    });
+  });
+  model={json,meshPrims,targetNames,dirty:new Set()};
+  buildPanel();
+  status.textContent=`${n} prims, ${nTargets} morph targets (editor v5)`;
+  dropEl.classList.remove("active");
+}
+
+// ── expressions / sliders ──
+function exprList(){
+  const vrm=model.json.extensions&&model.json.extensions.VRMC_vrm;
+  if(!vrm||!vrm.expressions)return [];
+  const out=[];
+  for(const [group,map] of Object.entries({preset:vrm.expressions.preset||{}, custom:vrm.expressions.custom||{}}))
+    for(const [name,ex] of Object.entries(map))
+      out.push({name:group==="custom"?"c:"+name:name, binds:ex.morphTargetBinds||[]});
+  return out;
+}
+function applyBinds(binds,v){
+  binds.forEach(b=>{
+    const meshIdx=model.json.nodes[b.node]&&model.json.nodes[b.node].mesh!=null?model.json.nodes[b.node].mesh:b.node;
+    (model.meshPrims[meshIdx]||[]).forEach(pid=>{
+      inst.exports.set_morph_weight(BigInt(pid),BigInt(b.index),v*(b.weight!=null?b.weight:1));
+      model.dirty.add(pid);
+    });
+  });
+  scheduleRebuild();
+}
+let rafPending=false;
+function scheduleRebuild(){
+  if(rafPending)return; rafPending=true;
+  requestAnimationFrame(()=>{ rafPending=false;
+    model.dirty.forEach(pid=>inst.exports.rebuild_prim(BigInt(pid)));
+    model.dirty.clear();
+  });
+}
+function sliderRow(parent,labelText,oninput){
+  const row=document.createElement("div"); row.className="slider";
+  const lab=document.createElement("label"); lab.textContent=labelText; lab.title=labelText;
+  const inp=document.createElement("input"); inp.type="range"; inp.min=0; inp.max=1; inp.step=0.01; inp.value=0;
+  const val=document.createElement("span"); val.textContent="0.00";
+  inp.addEventListener("input",()=>{ val.textContent=(+inp.value).toFixed(2); oninput(+inp.value); });
+  row.append(lab,inp,val); parent.appendChild(row);
+  return inp;
+}
+const exprInputs={};
+function buildPanel(){
+  const ex=document.getElementById("exprs"); ex.innerHTML="";
+  exprList().forEach(e=>{
+    if(!e.binds.length)return;
+    exprInputs[e.name]=sliderRow(ex,e.name,v=>applyBinds(e.binds,v));
+  });
+  if(!ex.children.length) ex.innerHTML='<i style="color:#556">no expressions</i>';
+  const mo=document.getElementById("morphs"); mo.innerHTML="";
+  Object.entries(model.targetNames).forEach(([mi,names])=>{
+    names.forEach((nm,ti)=>{
+      sliderRow(mo,nm,v=>{
+        (model.meshPrims[mi]||[]).forEach(pid=>{ inst.exports.set_morph_weight(BigInt(pid),BigInt(ti),v); model.dirty.add(pid); });
+        scheduleRebuild();
+      });
+    });
+  });
+}
+document.getElementById("resetExpr").addEventListener("click",()=>{
+  document.querySelectorAll('#panel input[type=range]').forEach(i=>{ i.value=0; i.dispatchEvent(new Event("input")); });
+});
+
+// ?expr=happy:1,blink:0.5  /  ?yaw=3.14  (headless verification hooks)
+function applyUrlParams(){
+  const q=new URLSearchParams(location.search);
+  const yaw=parseFloat(q.get("yaw")||"0");
+  if(yaw){ inst.exports.on_pointer_down(0,0,0n); inst.exports.on_pointer_move(-yaw/0.01,0); inst.exports.on_pointer_up(0,0,0n); }
+  const dist=parseFloat(q.get("dist")||"0");
+  if(dist){ inst.exports.on_wheel((dist-3.0)/0.003); }
+  const ty=parseFloat(q.get("ty")||"0"); // camera target height tweak via drag-up
+  if(ty){ inst.exports.on_pointer_down(0,0,0n); inst.exports.on_pointer_move(0,-ty/0.01); inst.exports.on_pointer_up(0,0,0n); }
+  const expr=q.get("expr");
+  if(expr&&model){ const list=exprList();
+    expr.split(",").forEach(pair=>{ const [nm,v]=pair.split(":");
+      const e=list.find(x=>x.name===nm); if(e) applyBinds(e.binds,parseFloat(v||"1"));
+      if(exprInputs[nm]){ exprInputs[nm].value=parseFloat(v||"1"); }
+    });
   }
-  function wirePointer(){
-    const c=document.getElementById("canvas");
-    c.addEventListener("pointerdown", e=>inst.exports.on_pointer_down(e.clientX,e.clientY,BigInt(e.button)));
-    c.addEventListener("pointerup",   e=>inst.exports.on_pointer_up(e.clientX,e.clientY,BigInt(e.button)));
-    c.addEventListener("pointermove", e=>inst.exports.on_pointer_move(e.clientX,e.clientY));
-    c.addEventListener("wheel", e=>{ e.preventDefault(); inst.exports.on_wheel(e.deltaY); }, {passive:false});
-  }
-  document.body.addEventListener("dragover", e=>{ e.preventDefault(); dropEl.classList.add("active"); });
-  document.body.addEventListener("dragleave", e=>{ if(e.target===document.body) dropEl.classList.remove("active"); });
-  document.body.addEventListener("drop", async e=>{ e.preventDefault();
-    const f=e.dataTransfer.files[0]; if(f) loadVRM(await f.arrayBuffer()); });
-  document.getElementById("label").addEventListener("click", ()=>fileEl.click());
-  fileEl.addEventListener("change", async ()=>{ const f=fileEl.files[0]; if(f) loadVRM(await f.arrayBuffer()); });
-  </script>
+}
+
+// ── input ──
+function wirePointer(){
+  cv.addEventListener("pointerdown",e=>inst.exports.on_pointer_down(e.clientX,e.clientY,BigInt(e.button)));
+  cv.addEventListener("pointerup",e=>inst.exports.on_pointer_up(e.clientX,e.clientY,BigInt(e.button)));
+  cv.addEventListener("pointermove",e=>inst.exports.on_pointer_move(e.clientX,e.clientY));
+  cv.addEventListener("wheel",e=>{e.preventDefault();inst.exports.on_wheel(e.deltaY);},{passive:false});
+}
+document.body.addEventListener("dragover",e=>{e.preventDefault();dropEl.classList.add("active");});
+document.body.addEventListener("dragleave",e=>{if(e.target===document.body)dropEl.classList.remove("active");});
+document.body.addEventListener("drop",async e=>{e.preventDefault();const f=e.dataTransfer.files[0];if(f)loadVRM(await f.arrayBuffer());});
+document.getElementById("label").addEventListener("click",()=>fileEl.click());
+fileEl.addEventListener("change",async()=>{const f=fileEl.files[0];if(f)loadVRM(await f.arrayBuffer());});
+</script>
 </body>
 </html>

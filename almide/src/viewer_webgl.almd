@@ -28,11 +28,27 @@ let g_n_prims = bytes.new(4)
 let MAX_PRIMS = 512
 // per-prim: [vbo:i32][ibo:i32][idx_count:i32][tex:i32][sr:f32][sg:f32][sb:f32]
 //           [alpha_mode:i32][ow:f32][or:f32][og:f32][ob:f32]
+//           [vptr:i32][vcount:i32][work_ptr:i32][morph_cnt:i32]
 //   alpha_mode: 0=OPAQUE, 1=MASK(cutout), 2=BLEND
 //   ow = MToon outlineWidthFactor in world units (0 = no outline, the default —
 //   three-vrm only draws outlines for materials that opt in)
-let PRIM_STRIDE = 48
-let g_prim_meta = bytes.new(24576)
+//   vptr/work_ptr are absolute addresses INSIDE g_pool (see below)
+let PRIM_STRIDE = 64
+let g_prim_meta = bytes.new(32768)
+
+// ── Geometry/morph pool ──
+// One big static Bytes the JS host writes vertex + morph-delta data into via
+// pool_alloc/pool_ptr. Everything morph-related lives here so Almide can do
+// the blend math with the safe bytes API (no RawPtr bridge on wasm, #440),
+// and the backing memory is never RC-managed per-allocation.
+let POOL_SIZE = 50331648   // 48 MiB (Almaid face: 8 prims x 57 targets fits)
+let g_pool = bytes.new(50331648)
+let g_pool_used = bytes.new(4)
+
+// morph tables: [pid * MAX_TARGETS + ti]
+let MAX_TARGETS = 64
+let g_mt_ptr = bytes.new(131072)   // i32 absolute delta ptr (xyz f32 per vertex)
+let g_mt_w = bytes.new(131072)     // f32 weight
 let MAX_IMAGES = 256
 let g_img_tex = bytes.new(1024)
 let g_cam = bytes.new(12)   // yaw:f32, pitch:f32, dist:f32
@@ -255,6 +271,12 @@ effect fn main() -> Unit = {
   let _ = reset_prims()
   let _ = add_prim(0, 0, 0, 0, 0, 0, 0.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0)
   let _ = set_aspect(1.333)
+  let _ = pool_ptr()
+  let _ = pool_alloc(0)
+  let _ = pool_reset()
+  let _ = add_morph_target(0 - 1, 0)
+  let _ = set_morph_weight(0 - 1, 0, 0.0)
+  let _ = rebuild_prim(0 - 1)
 }
 
 pub fn set_aspect(a: Float) -> Int = {
@@ -488,8 +510,106 @@ pub fn add_prim(vptr: Int, vcount: Int, iptr: Int, icount: Int,
     bytes.set_f32_le(g_prim_meta, po + 36, ocr)
     bytes.set_f32_le(g_prim_meta, po + 40, ocg)
     bytes.set_f32_le(g_prim_meta, po + 44, ocb)
+    bytes.set_i32_le(g_prim_meta, po + 48, vptr)
+    bytes.set_i32_le(g_prim_meta, po + 52, vcount)
+    bytes.set_i32_le(g_prim_meta, po + 56, 0)
+    bytes.set_i32_le(g_prim_meta, po + 60, 0)
     bytes.set_i32_le(g_n_prims, 0, pid + 1)
     pid + 1
+  }
+}
+
+// ── Pool + morph API (host writes data, Almide owns the blend math) ──
+
+pub fn pool_ptr() -> Int = bytes.data_ptr(g_pool)
+
+// Bump-allocate n bytes (4-aligned) inside g_pool; returns ABSOLUTE address.
+// 0 = pool exhausted.
+pub fn pool_alloc(n: Int) -> Int = {
+  let used = bytes.read_i32_le(g_pool_used, 0)
+  let aligned = (n + 3) / 4 * 4
+  if used + aligned > POOL_SIZE then 0
+  else {
+    bytes.set_i32_le(g_pool_used, 0, used + aligned)
+    bytes.data_ptr(g_pool) + used
+  }
+}
+
+pub fn pool_reset() -> Int = {
+  bytes.set_i32_le(g_pool_used, 0, 0)
+  0
+}
+
+// Register a morph target for prim `pid`. `delta_ptr` = absolute address (in
+// g_pool) of vcount x vec3 f32 position deltas. Returns new target count.
+pub fn add_morph_target(pid: Int, delta_ptr: Int) -> Int = {
+  if pid < 0 or pid >= MAX_PRIMS then 0
+  else {
+    let po = pid * PRIM_STRIDE
+    let cnt = bytes.read_i32_le(g_prim_meta, po + 60)
+    if cnt >= MAX_TARGETS then cnt
+    else {
+      let slot = (pid * MAX_TARGETS + cnt) * 4
+      bytes.set_i32_le(g_mt_ptr, slot, delta_ptr)
+      bytes.set_f32_le(g_mt_w, slot, 0.0)
+      bytes.set_i32_le(g_prim_meta, po + 60, cnt + 1)
+      cnt + 1
+    }
+  }
+}
+
+pub fn set_morph_weight(pid: Int, ti: Int, w: Float) -> Int = {
+  if pid >= 0 and pid < MAX_PRIMS and ti >= 0 and ti < MAX_TARGETS then {
+    bytes.set_f32_le(g_mt_w, (pid * MAX_TARGETS + ti) * 4, w)
+    0
+  } else 0
+}
+
+// Re-blend prim `pid` (base + sum of weighted deltas) and re-upload its VBO.
+// Positions are the first 12 bytes of each 44-byte vertex.
+pub fn rebuild_prim(pid: Int) -> Int = {
+  if pid < 0 or pid >= bytes.read_i32_le(g_n_prims, 0) then 0
+  else {
+    let po = pid * PRIM_STRIDE
+    let vptr = bytes.read_i32_le(g_prim_meta, po + 48)
+    let vc = bytes.read_i32_le(g_prim_meta, po + 52)
+    let cnt = bytes.read_i32_le(g_prim_meta, po + 60)
+    if vptr == 0 or vc == 0 or cnt == 0 then 0
+    else {
+      var work = bytes.read_i32_le(g_prim_meta, po + 56)
+      if work == 0 then {
+        work = pool_alloc(vc * STRIDE)
+        bytes.set_i32_le(g_prim_meta, po + 56, work)
+      } else {}
+      if work == 0 then 0
+      else {
+        let base = bytes.data_ptr(g_pool)
+        let src_off = vptr - base
+        let dst_off = work - base
+        bytes.copy_from(g_pool, g_pool, dst_off, src_off, vc * STRIDE)
+        var ti = 0
+        while ti < cnt {
+          let slot = (pid * MAX_TARGETS + ti) * 4
+          let w = bytes.read_f32_le(g_mt_w, slot)
+          if w > 0.0001 or w < 0.0 - 0.0001 then {
+            let d_off = bytes.read_i32_le(g_mt_ptr, slot) - base
+            var vi = 0
+            while vi < vc {
+              let wo = dst_off + vi * STRIDE
+              let so = d_off + vi * 12
+              bytes.set_f32_le(g_pool, wo, bytes.read_f32_le(g_pool, wo) + bytes.read_f32_le(g_pool, so) * w)
+              bytes.set_f32_le(g_pool, wo + 4, bytes.read_f32_le(g_pool, wo + 4) + bytes.read_f32_le(g_pool, so + 4) * w)
+              bytes.set_f32_le(g_pool, wo + 8, bytes.read_f32_le(g_pool, wo + 8) + bytes.read_f32_le(g_pool, so + 8) * w)
+              vi = vi + 1
+            }
+          } else {}
+          ti = ti + 1
+        }
+        webgl.bind_buffer(webgl.array_buffer(), bytes.read_i32_le(g_prim_meta, po))
+        webgl.buffer_data_f32_ptr(webgl.array_buffer(), work, vc * STRIDE, webgl.dynamic_draw())
+        0
+      }
+    }
   }
 }
 
