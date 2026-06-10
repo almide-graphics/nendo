@@ -69,7 +69,7 @@
       </div>
       <div class="tab" id="tab-body">
         <h2>体型</h2><div id="bodyparams"><i style="color:#556">no skeleton</i></div>
-        <h2>顔 <span style="text-transform:none;color:#667">(プレビューのみ)</span></h2><div id="faceparams"></div>
+        <h2>顔 <span style="text-transform:none;color:#667">(保存時に形状へベイク)</span></h2><div id="faceparams"></div>
         <h2>姿勢 <span style="text-transform:none;color:#667">(プレビューのみ)</span></h2><div id="poseparams"></div>
       </div>
       <div class="tab" id="tab-expr"><div id="exprs"></div></div>
@@ -170,7 +170,7 @@ function outline(json,mi){
 }
 
 // ── GLB repack ──
-function repackGLB(buf,mutateJson,imageReplacements={}){
+function repackGLB(buf,mutateJson,imageReplacements={},bvReplacements={}){
   const dv=new DataView(buf);const total=dv.getUint32(8,true);
   let off=12,jsonStr=null,binOff=0;
   while(off+8<=total){const cl=dv.getUint32(off,true),ct=dv.getUint32(off+4,true);off+=8;
@@ -178,7 +178,7 @@ function repackGLB(buf,mutateJson,imageReplacements={}){
     else if(ct===0x004E4942)binOff=off; off+=cl;}
   const json=JSON.parse(jsonStr);
   if(mutateJson)mutateJson(json);
-  const bvRepl={};
+  const bvRepl={...bvReplacements};
   for(const [imgIdx,bytes] of Object.entries(imageReplacements)){
     const bvi=json.images[imgIdx].bufferView;
     if(bvi!=null)bvRepl[bvi]=bytes;
@@ -262,7 +262,53 @@ async function deriveBuf(){
       repl[idx]=await recolorBytes(src,hex);
     }
   }
+  // face params → bake into POSITION buffers (model shape, like body params).
+  // Morph target deltas are relative, so VRM expressions keep working.
+  const bvRepl={}, accPatch={};
+  const faceActive=Object.entries(doc.ui.face||{}).filter(([,v])=>v);
+  if(faceActive.length){
+    const hm=humanoidMap(json);
+    if(hm.leftEye!=null&&hm.rightEye!=null){
+      const eL=nodeWorldPos(json,hm.leftEye), eR=nodeWorldPos(json,hm.rightEye);
+      const sigma=0.032, s2=2*sigma*sigma;
+      (json.meshes||[]).forEach(mesh=>{
+        if(!mesh.primitives.some(p=>(p.targets||[]).length))return;
+        mesh.primitives.forEach(prim=>{
+          const ai=prim.attributes&&prim.attributes.POSITION; if(ai==null)return;
+          const acc=json.accessors[ai], bvi=acc.bufferView; if(bvi==null)return;
+          const bv=json.bufferViews[bvi];
+          if(bv.byteStride&&bv.byteStride!==12)return;  // interleaved → skip
+          if((acc.byteOffset||0)!==0)return;            // shared view → skip
+          if(bvRepl[bvi])return;
+          const pos=accF32(doc.originalBuf,binOff,json,ai);
+          const out=new Float32Array(pos);
+          const mn=[1/0,1/0,1/0], mx=[-1/0,-1/0,-1/0];
+          for(let i=0;i<acc.count;i++){
+            const x=pos[i*3],y=pos[i*3+1],z=pos[i*3+2];
+            const dLn=Math.hypot(x-eL[0],y-eL[1],z-eL[2]),dRn=Math.hypot(x-eR[0],y-eR[1],z-eR[2]);
+            const e=dLn<=dRn?eL:eR, dd=Math.min(dLn,dRn);
+            const g=Math.exp(-dd*dd/s2);
+            if(g>=0.01){
+              for(const [k,v] of faceActive){
+                const idx=FACE_PARAMS.indexOf(k);
+                if(idx===0)out[i*3]+=(x-e[0])*g*0.6*v;
+                else if(idx===1)out[i*3+1]+=(y-e[1])*g*0.6*v;
+                else if(idx===2)out[i*3+1]+=g*0.012*v;
+                else if(idx===3)out[i*3]+=(e[0]>=0?1:-1)*g*0.01*v;
+              }
+            }
+            for(let c=0;c<3;c++){mn[c]=Math.min(mn[c],out[i*3+c]);mx[c]=Math.max(mx[c],out[i*3+c]);}
+          }
+          bvRepl[bvi]=new Uint8Array(out.buffer);
+          accPatch[ai]={min:mn,max:mx};
+        });
+      });
+    }
+  }
   return repackGLB(doc.originalBuf,j=>{
+    for(const [ai,p] of Object.entries(accPatch)){
+      j.accessors[ai].min=p.min; j.accessors[ai].max=p.max;
+    }
     if(doc.params.title!=null){
       const ext=j.extensions=j.extensions||{};
       const vrm=ext.VRMC_vrm=ext.VRMC_vrm||{};
@@ -290,7 +336,7 @@ async function deriveBuf(){
         });
       }
     }
-  },repl);
+  },repl,bvRepl);
 }
 
 // edits → re-derive → re-upload geometry → re-apply morph weights (UI untouched)
@@ -726,6 +772,10 @@ function applyUrlParams(){
       const [k,v]=pair.split(":");
       doc.ui.face[k]=parseFloat(v||"1");applyFaceParam(k,parseFloat(v||"1"));
     });
+  }
+  // ?bake=1 — derive (bake face params) and reopen the derived VRM (headless test)
+  if(q.get("bake")&&doc){
+    deriveBuf().then(b=>{ openDocument(b); });
   }
   const bg=q.get("bg");
   if(bg)inst.exports.set_bg(parseInt(bg.slice(0,2),16)/255,parseInt(bg.slice(2,4),16)/255,parseInt(bg.slice(4,6),16)/255);
