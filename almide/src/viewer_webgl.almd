@@ -35,7 +35,8 @@ let MAX_PRIMS = 512
 //   vptr/work_ptr are absolute addresses INSIDE g_pool (see below)
 let PRIM_STRIDE = 64
 let g_prim_meta = bytes.new(32768)
-// per-prim MToon params, 48B: [shift][toony][em rgb][rim rgb][rimPow][rimLift]
+// per-prim MToon params, 48B:
+// [shift][toony][em rgb][rim rgb][rimPow][rimLift][shadeTex:i32][emTex:i32]
 let MTOON_BLOB = 48
 let g_prim_mtoon = bytes.new(24576)
 
@@ -197,6 +198,10 @@ let S_T_EMIS = 26
 let S_T_RIMC = 27
 let S_T_RIMP = 28
 let S_T_RIML = 29
+let S_T_SHTEX = 30
+let S_T_HAS_SHTEX = 31
+let S_T_EMTEX = 32
+let S_T_HAS_EMTEX = 33
 
 let toon_vs = """
   attribute vec3 a_position;
@@ -242,6 +247,10 @@ let toon_fs = """
   uniform float u_rim_lift;     // parametricRimLiftFactor
   uniform sampler2D u_tex;
   uniform int u_has_tex;
+  uniform sampler2D u_shade_tex;   // MToon shadeMultiplyTexture
+  uniform int u_has_shade_tex;
+  uniform sampler2D u_em_tex;      // emissiveTexture
+  uniform int u_has_em_tex;
   uniform int u_alpha_mode;     // 0 OPAQUE, 1 MASK, 2 BLEND
   float lstep(float a, float b, float t){ return clamp((t - a) / (b - a), 0.0, 1.0); }
   void main() {
@@ -250,7 +259,8 @@ let toon_fs = """
     if (u_alpha_mode == 1) { if (tex.a < 0.5) discard; }   // MASK cutout
     else if (u_alpha_mode == 2) { alpha = tex.a; }         // BLEND
     vec3 diffuse = v_color * tex.rgb;          // litFactor x baseColor
-    vec3 shade   = u_shade_color * tex.rgb;    // shadeColorFactor x baseColor
+    // three-vrm: shade = shadeColorFactor x shadeMultiplyTexture (factor only when absent)
+    vec3 shade = u_shade_color * ((u_has_shade_tex == 1) ? texture2D(u_shade_tex, v_uv).rgb : vec3(1.0));
     vec3 n = normalize(v_norm);
     if (!gl_FrontFacing) n = -n;
     float dotNL = clamp(dot(n, normalize(u_sun_dir)), -1.0, 1.0);
@@ -259,7 +269,7 @@ let toon_fs = """
     col = min(col, diffuse);
     vec3 vdir = normalize(u_eye - v_wpos);
     col += u_rim_color * pow(clamp(1.0 - dot(n, vdir) + u_rim_lift, 0.0, 1.0), u_rim_pow);
-    col += u_emissive;
+    col += u_emissive * ((u_has_em_tex == 1) ? texture2D(u_em_tex, v_uv).rgb : vec3(1.0));
     gl_FragColor = vec4(col, alpha);
   }
   """
@@ -385,6 +395,10 @@ effect fn main() -> Unit = {
   webgl.set_state(S_T_RIMC, webgl.get_uniform_location(toon, "u_rim_color"))
   webgl.set_state(S_T_RIMP, webgl.get_uniform_location(toon, "u_rim_pow"))
   webgl.set_state(S_T_RIML, webgl.get_uniform_location(toon, "u_rim_lift"))
+  webgl.set_state(S_T_SHTEX, webgl.get_uniform_location(toon, "u_shade_tex"))
+  webgl.set_state(S_T_HAS_SHTEX, webgl.get_uniform_location(toon, "u_has_shade_tex"))
+  webgl.set_state(S_T_EMTEX, webgl.get_uniform_location(toon, "u_em_tex"))
+  webgl.set_state(S_T_HAS_EMTEX, webgl.get_uniform_location(toon, "u_has_em_tex"))
   webgl.set_state(S_T_POS, webgl.get_attrib_location(toon, "a_position"))
   webgl.set_state(S_T_NORM, webgl.get_attrib_location(toon, "a_normal"))
   webgl.set_state(S_T_COL, webgl.get_attrib_location(toon, "a_color"))
@@ -795,6 +809,8 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
           var rimb = 0.0
           var rimp = 5.0
           var riml = 0.0
+          var sh_tex = 0 - 1
+          var em_tex = 0 - 1
           if mat_i >= 0 then {
             let material = arr_at(gltf, "materials", mat_i)
             match json.get(material, "pbrMetallicRoughness") {
@@ -813,14 +829,20 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
             }
             let am = option.unwrap_or(json.get_string(material, "alphaMode"), "OPAQUE")
             amode = if am == "BLEND" then 2 else if am == "MASK" then 1 else 0
-            // emissiveFactor only when there is no emissiveTexture (we have a
-            // single sampler; VRoid emissive textures are near-black so the
-            // three-vrm contribution is ~0 there anyway)
-            if option.is_some(json.get(material, "emissiveTexture")) then {} else {
-              let ef = option.unwrap_or(json.get_array(material, "emissiveFactor"), [])
-              emr = lf(ef, 0, 0.0)
-              emg = lf(ef, 1, 0.0)
-              emb = lf(ef, 2, 0.0)
+            let ef = option.unwrap_or(json.get_array(material, "emissiveFactor"), [])
+            emr = lf(ef, 0, 0.0)
+            emg = lf(ef, 1, 0.0)
+            emb = lf(ef, 2, 0.0)
+            match json.get(material, "emissiveTexture") {
+              some(et) => {
+                let eti = option.unwrap_or(json.get_int(et, "index"), 0 - 1)
+                if eti >= 0 then {
+                  let etex = arr_at(gltf, "textures", eti)
+                  let esrc = option.unwrap_or(json.get_int(etex, "source"), 0 - 1)
+                  if esrc >= 0 and esrc < MAX_IMAGES then { em_tex = bytes.read_i32_le(g_img_tex, esrc * 4) } else {}
+                } else {}
+              },
+              none => {},
             }
             match json.get(material, "extensions") {
               some(ext) => match json.get(ext, "VRMC_materials_mtoon") {
@@ -836,6 +858,17 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
                   rimb = lf(rc2, 2, 0.0)
                   rimp = jnumf(mt, "parametricRimFresnelPowerFactor", 5.0)
                   riml = jnumf(mt, "parametricRimLiftFactor", 0.0)
+                  match json.get(mt, "shadeMultiplyTexture") {
+                    some(st) => {
+                      let sti = option.unwrap_or(json.get_int(st, "index"), 0 - 1)
+                      if sti >= 0 then {
+                        let stex = arr_at(gltf, "textures", sti)
+                        let ssrc = option.unwrap_or(json.get_int(stex, "source"), 0 - 1)
+                        if ssrc >= 0 and ssrc < MAX_IMAGES then { sh_tex = bytes.read_i32_le(g_img_tex, ssrc * 4) } else {}
+                      } else {}
+                    },
+                    none => {},
+                  }
                   let om = option.unwrap_or(json.get_string(mt, "outlineWidthMode"), "none")
                   if om != "none" then {
                     ow = option.unwrap_or(json.get_float(mt, "outlineWidthFactor"), 0.0)
@@ -887,6 +920,8 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
           bytes.set_f32_le(g_prim_mtoon, mto + 28, rimb)
           bytes.set_f32_le(g_prim_mtoon, mto + 32, rimp)
           bytes.set_f32_le(g_prim_mtoon, mto + 36, riml)
+          bytes.set_i32_le(g_prim_mtoon, mto + 40, sh_tex)
+          bytes.set_i32_le(g_prim_mtoon, mto + 44, em_tex)
 
           // morph targets (POSITION deltas → pool)
           let n_tg = arr_len(prim, "targets")
@@ -1387,6 +1422,8 @@ pub fn add_prim(vptr: Int, vcount: Int, iptr: Int, icount: Int,
     bytes.set_f32_le(g_prim_mtoon, mto2 + 28, 0.0)
     bytes.set_f32_le(g_prim_mtoon, mto2 + 32, 5.0)
     bytes.set_f32_le(g_prim_mtoon, mto2 + 36, 0.0)
+    bytes.set_i32_le(g_prim_mtoon, mto2 + 40, 0 - 1)
+    bytes.set_i32_le(g_prim_mtoon, mto2 + 44, 0 - 1)
     bytes.set_i32_le(g_n_prims, 0, pid + 1)
     pid + 1
   }
@@ -1567,6 +1604,21 @@ fn draw_prim_toon(po: Int) -> Unit = {
     bytes.read_f32_le(g_prim_mtoon, mo + 20), bytes.read_f32_le(g_prim_mtoon, mo + 24), bytes.read_f32_le(g_prim_mtoon, mo + 28))
   webgl.uniform1f(webgl.get_state(S_T_RIMP), bytes.read_f32_le(g_prim_mtoon, mo + 32))
   webgl.uniform1f(webgl.get_state(S_T_RIML), bytes.read_f32_le(g_prim_mtoon, mo + 36))
+  let sht = bytes.read_i32_le(g_prim_mtoon, mo + 40)
+  if sht > 0 then {
+    webgl.active_texture(webgl.texture0() + 1)
+    webgl.bind_texture(webgl.texture_2d(), sht)
+    webgl.uniform1i(webgl.get_state(S_T_SHTEX), 1)
+    webgl.uniform1i(webgl.get_state(S_T_HAS_SHTEX), 1)
+  } else { webgl.uniform1i(webgl.get_state(S_T_HAS_SHTEX), 0) }
+  let emt = bytes.read_i32_le(g_prim_mtoon, mo + 44)
+  if emt > 0 then {
+    webgl.active_texture(webgl.texture0() + 2)
+    webgl.bind_texture(webgl.texture_2d(), emt)
+    webgl.uniform1i(webgl.get_state(S_T_EMTEX), 2)
+    webgl.uniform1i(webgl.get_state(S_T_HAS_EMTEX), 1)
+  } else { webgl.uniform1i(webgl.get_state(S_T_HAS_EMTEX), 0) }
+  webgl.active_texture(webgl.texture0())
   webgl.uniform3f(webgl.get_state(S_T_SHADE),
     bytes.read_f32_le(g_prim_meta, po + 16),
     bytes.read_f32_le(g_prim_meta, po + 20),
