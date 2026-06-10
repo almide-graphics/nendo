@@ -35,6 +35,10 @@
     <div id="status">loading wasm…</div>
   </div>
   <div id="panel">
+    <button class="reset" id="saveVrm" style="width:100%;margin:0 0 4px">💾 Save .vrm</button>
+    <div class="slider"><label>Title</label><input id="metaTitle" type="text" style="flex:1;background:#26263a;border:1px solid #3a3a52;color:#cfd;border-radius:4px;padding:2px 6px;font-size:12px"></div>
+    <h2>Textures</h2>
+    <div id="textures" style="display:flex;flex-wrap:wrap;gap:6px"></div>
     <h2>Expressions</h2>
     <div id="exprs"><i style="color:#556">load a VRM…</i></div>
     <button class="reset" id="resetExpr">Reset all</button>
@@ -125,6 +129,52 @@ function put(t,C){ const p=Number(inst.exports.__alloc(t.byteLength)); new C(mem
 
 // ── model state for the editor ──
 let model = null;  // { json, meshPrims: meshIdx→[pid], targetNames: meshIdx→[names], dirty:Set }
+let currentBuf = null;  // the document IS the .vrm bytes (GLB ArrayBuffer)
+
+// ── GLB repack: the editor's only mutation primitive ──
+// Rebuilds JSON + BIN chunks. imageReplacements: {imageIdx: Uint8Array(png/jpg)}.
+// mutateJson(json) may patch metadata etc. Returns a new ArrayBuffer.
+function repackGLB(buf, mutateJson, imageReplacements={}){
+  const dv=new DataView(buf);
+  const total=dv.getUint32(8,true);
+  let off=12,jsonStr=null,binOff=0,binLen=0;
+  while(off+8<=total){const cl=dv.getUint32(off,true),ct=dv.getUint32(off+4,true);off+=8;
+    if(ct===0x4E4F534A)jsonStr=new TextDecoder().decode(new Uint8Array(buf,off,cl));
+    else if(ct===0x004E4942){binOff=off;binLen=cl;} off+=cl;}
+  const json=JSON.parse(jsonStr);
+  if(mutateJson)mutateJson(json);
+  // map imageIdx → bufferView idx to replace
+  const bvRepl={};
+  for(const [imgIdx,bytes] of Object.entries(imageReplacements)){
+    const bvi=json.images[imgIdx].bufferView;
+    if(bvi!=null)bvRepl[bvi]=bytes;
+  }
+  // rebuild BIN: copy every bufferView (or its replacement) 4-aligned
+  const parts=[];let cur=0;
+  (json.bufferViews||[]).forEach((bv,i)=>{
+    const src=bvRepl[i]!==undefined?bvRepl[i]:new Uint8Array(buf,binOff+(bv.byteOffset||0),bv.byteLength);
+    bv.byteOffset=cur; bv.byteLength=src.length;
+    parts.push(src); cur+=src.length;
+    const pad=(4-(cur%4))%4; if(pad){parts.push(new Uint8Array(pad));cur+=pad;}
+  });
+  if(json.buffers&&json.buffers[0])json.buffers[0].byteLength=cur;
+  // serialize
+  let jb=new TextEncoder().encode(JSON.stringify(json));
+  const jpad=(4-(jb.length%4))%4;
+  if(jpad){const j2=new Uint8Array(jb.length+jpad);j2.set(jb);j2.fill(0x20,jb.length);jb=j2;}
+  const totalLen=12+8+jb.length+8+cur;
+  const out=new ArrayBuffer(totalLen);const odv=new DataView(out);const ou=new Uint8Array(out);
+  odv.setUint32(0,0x46546C67,true);odv.setUint32(4,2,true);odv.setUint32(8,totalLen,true);
+  odv.setUint32(12,jb.length,true);odv.setUint32(16,0x4E4F534A,true);ou.set(jb,20);
+  let p=20+jb.length;
+  odv.setUint32(p,cur,true);odv.setUint32(p+4,0x004E4942,true);p+=8;
+  for(const part of parts){ou.set(part,p);p+=part.length;}
+  return out;
+}
+function applyEdit(mutateJson,imageReplacements){
+  currentBuf=repackGLB(currentBuf,mutateJson,imageReplacements);
+  loadVRM(currentBuf);
+}
 
 function loadVRM(buf){
   const dv=new DataView(buf);
@@ -171,10 +221,56 @@ function loadVRM(buf){
     });
   });
   model={json,meshPrims,targetNames,dirty:new Set()};
+  currentBuf=buf;
   buildPanel();
-  status.textContent=`${n} prims, ${nTargets} morph targets (editor v5)`;
+  buildTexturePanel(buf,binOff,json);
+  const meta=json.extensions&&json.extensions.VRMC_vrm&&json.extensions.VRMC_vrm.meta;
+  document.getElementById("metaTitle").value=(meta&&meta.name)||"";
+  status.textContent=`${n} prims, ${nTargets} morph targets (editor v6)`;
   dropEl.classList.remove("active");
 }
+
+// ── texture panel ──
+function buildTexturePanel(buf,binOff,json){
+  const tp=document.getElementById("textures"); tp.innerHTML="";
+  (json.images||[]).forEach((img,i)=>{
+    if(img.bufferView==null)return;
+    const bv=json.bufferViews[img.bufferView];
+    const blob=new Blob([new Uint8Array(buf,binOff+(bv.byteOffset||0),bv.byteLength)],{type:img.mimeType||"image/png"});
+    const el=document.createElement("img");
+    el.src=URL.createObjectURL(blob);
+    el.style.cssText="width:64px;height:64px;object-fit:cover;border:1px solid #3a3a52;border-radius:6px;cursor:pointer;background:#111";
+    el.title=`image ${i}${img.name?" — "+img.name:""} (click to replace)`;
+    el.addEventListener("click",()=>{
+      const fi=document.createElement("input"); fi.type="file"; fi.accept="image/png,image/jpeg";
+      fi.addEventListener("change",async()=>{
+        const f=fi.files[0]; if(!f)return;
+        applyEdit(null,{[i]:new Uint8Array(await f.arrayBuffer())});
+      });
+      fi.click();
+    });
+    tp.appendChild(el);
+  });
+}
+
+// ── save / meta ──
+document.getElementById("saveVrm").addEventListener("click",()=>{
+  if(!currentBuf)return;
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([currentBuf],{type:"model/gltf-binary"}));
+  const t=document.getElementById("metaTitle").value||"model";
+  a.download=t.replace(/[^\w\-ぁ-んァ-ヶ一-龠]/g,"_")+".vrm";
+  a.click();
+});
+document.getElementById("metaTitle").addEventListener("change",()=>{
+  if(!currentBuf)return;
+  const v=document.getElementById("metaTitle").value;
+  applyEdit(j=>{
+    const ext=j.extensions=j.extensions||{};
+    const vrm=ext.VRMC_vrm=ext.VRMC_vrm||{};
+    (vrm.meta=vrm.meta||{}).name=v;
+  });
+});
 
 // ── expressions / sliders ──
 function exprList(){
@@ -244,6 +340,14 @@ function applyUrlParams(){
   if(dist){ inst.exports.on_wheel((dist-3.0)/0.003); }
   const ty=parseFloat(q.get("ty")||"0"); // camera target height tweak via drag-up
   if(ty){ inst.exports.on_pointer_down(0,0,0n); inst.exports.on_pointer_move(0,-ty/0.01); inst.exports.on_pointer_up(0,0,0n); }
+  // ?recolor=15:ff3355 — replace image N with a solid-color PNG (headless test)
+  const rc=q.get("recolor");
+  if(rc&&model){
+    const [idx,hex]=rc.split(":");
+    const c=document.createElement("canvas"); c.width=c.height=64;
+    const g=c.getContext("2d"); g.fillStyle="#"+hex; g.fillRect(0,0,64,64);
+    c.toBlob(async b=>{ applyEdit(null,{[idx]:new Uint8Array(await b.arrayBuffer())}); },"image/png");
+  }
   const expr=q.get("expr");
   if(expr&&model){ const list=exprList();
     expr.split(",").forEach(pair=>{ const [nm,v]=pair.split(":");
