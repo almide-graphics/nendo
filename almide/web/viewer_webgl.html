@@ -60,8 +60,9 @@
         <h2>ルックプリセット</h2>
         <div id="presets" style="display:flex;flex-wrap:wrap;gap:6px"></div>
         <div class="crow" style="margin-top:6px"><input id="presetName" type="text" placeholder="プリセット名"><button class="clr" id="presetSave" style="color:#6c63ff;font-size:12px">＋保存</button></div>
-        <h2>パーツ</h2>
-        <div class="crow"><label>髪を移植</label><button class="clr" id="hairBtn" style="color:#6c63ff;font-size:12px">VRMを選ぶ…</button>
+        <h2>髪カタログ <span style="text-transform:none;color:#667">(クリックで試着)</span></h2>
+        <div id="hairCatalog" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+        <div class="crow" style="margin-top:4px"><label>自分のVRM</label><button class="clr" id="hairBtn" style="color:#6c63ff;font-size:12px">選ぶ…</button>
           <input id="hairFile" type="file" accept=".vrm,.glb" class="hidden"></div>
         <h2>カラー</h2>
         <div id="colors"></div>
@@ -878,6 +879,23 @@ async function doHairTransplant(donorBuf){
   }catch(e){ status.textContent="移植エラー: "+e.message; console.error(e); }
 }
 document.getElementById("hairBtn").addEventListener("click",()=>document.getElementById("hairFile").click());
+// hair catalog palette (thumbs from parts_catalog/manifest.json)
+fetch("parts_catalog/manifest.json").then(r=>r.json()).then(list=>{
+  const grid=document.getElementById("hairCatalog");
+  list.forEach(it=>{
+    const cell=document.createElement("div");
+    cell.style.cssText="width:64px;cursor:pointer;text-align:center";
+    cell.innerHTML=`<img src="parts_catalog/${it.thumb}" style="width:60px;height:60px;border:1px solid #3a3a52;border-radius:8px;object-fit:cover">
+      <div style="font-size:10px;color:#8a8aa0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${it.name}</div>`;
+    cell.addEventListener("click",async()=>{
+      cell.firstElementChild.style.borderColor="#6c63ff";
+      status.textContent="髪を取得中… "+it.name;
+      const buf=await (await fetch("parts_catalog/"+it.file)).arrayBuffer();
+      doHairTransplant(buf);
+    });
+    grid.appendChild(cell);
+  });
+}).catch(()=>{document.getElementById("hairCatalog").innerHTML='<i style="color:#556">カタログなし</i>';});
 document.getElementById("hairFile").addEventListener("change",async function(){
   const f=this.files[0]; if(f&&doc)doHairTransplant(await f.arrayBuffer());
 });

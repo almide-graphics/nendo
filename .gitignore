@@ -8,3 +8,4 @@ build/
 nendo.wasm
 nendo.cwasm
 .almide/
+almide/web/parts_catalog/
