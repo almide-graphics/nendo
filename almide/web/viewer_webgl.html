@@ -804,6 +804,9 @@ function applyUrlParams(){
   if(psv&&doc)savePreset(psv);
   const pld=q.get("preset");
   if(pld&&doc){ const p=loadPresets().find(x=>x.name===pld); if(p)applyPreset(p); }
+  const rd=q.get("rimdbg");
+  if(rd&&doc){const r=parseInt(rd.slice(0,2),16)/255,g=parseInt(rd.slice(2,4),16)/255,b=parseInt(rd.slice(4,6),16)/255;
+    inst.exports.debug_rim(r,g,b,3.0);}
   const bg=q.get("bg");
   if(bg)inst.exports.set_bg(parseInt(bg.slice(0,2),16)/255,parseInt(bg.slice(2,4),16)/255,parseInt(bg.slice(4,6),16)/255);
   if(q.get("dbg3")&&doc.faceTi){
