@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>almide2d — Almide 2.5D avatar</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#14141c;color:#cfd;font:13px/1.5 -apple-system,sans-serif}
+  canvas{display:block;width:100vw;height:100vh}
+  #hud{position:fixed;left:12px;bottom:10px;font-family:monospace;font-size:11px;color:#7c7}
+  #panel{position:fixed;right:12px;top:12px;background:#1b1b26cc;border:1px solid #2a2a3a;border-radius:10px;padding:10px 14px;width:220px}
+  .row{display:flex;align-items:center;gap:8px;margin:4px 0;font-size:12px;color:#aab}
+  .row label{width:54px}
+  input[type=range]{flex:1;accent-color:#6c63ff}
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="panel">
+  <div class="row"><label>口</label><input id="mouth" type="range" min="0" max="1" step="0.01" value="0"></div>
+  <div class="row" style="color:#667">マウスを動かすと視線が追従・自動まばたき・呼吸・髪の遅延揺れ</div>
+</div>
+<div id="hud">loading…</div>
+<script src="../webgl.js"></script>
+<script>
+const hud=document.getElementById("hud");
+const cv=document.getElementById("canvas");
+const dpr=window.devicePixelRatio||1;
+cv.width=Math.round(innerWidth*dpr); cv.height=Math.round(innerHeight*dpr);
+AlmideWebGL.load("avatar2d.wasm","canvas").then(async i=>{
+  const mem=i.exports.memory;
+  i.exports.set_aspect(innerWidth/innerHeight);
+  const png=new Uint8Array(await (await fetch("avatar.png")).arrayBuffer());
+  const p=Number(i.exports.__alloc(png.length));
+  new Uint8Array(mem.buffer,p,png.length).set(png);
+  i.exports.load_avatar(BigInt(p),BigInt(png.length));
+  hud.textContent="almide2d ready — マウスで追従";
+  addEventListener("pointermove",e=>{
+    i.exports.set_pointer((e.clientX/innerWidth)*2-1,(e.clientY/innerHeight)*2-1);
+  });
+  document.getElementById("mouth").addEventListener("input",e=>i.exports.set_mouth(+e.target.value));
+  const q=new URLSearchParams(location.search);
+  if(q.get("look"))i.exports.set_pointer(parseFloat(q.get("look")),parseFloat(q.get("looky")||"0"));
+  if(q.get("mouth"))i.exports.set_mouth(parseFloat(q.get("mouth")));
+}).catch(e=>{hud.textContent="error: "+e.message;console.error(e);});
+</script>
+</body>
+</html>

@@ -1,0 +1,267 @@
+// avatar2d — Almide-owned 2.5D layered-illustration avatar (Live2D-style).
+// One illustration + regional deformation fields evaluated in the VERTEX
+// SHADER (zero per-frame buffer uploads). Almide owns the animation brain:
+// auto-blink envelope, breathing, cursor-follow spring, lagged hair spring.
+import obsid.webgl as webgl
+import math
+
+let GRID_W = 48
+let GRID_H = 60
+// image aspect: 512 x 629
+let IMG_ASPECT = 0.814
+
+// ── state ──
+let g_state = bytes.new(16)    // [prog][vbo][ibo][tex]
+let g_loc = bytes.new(64)      // uniform locations
+let g_anim = bytes.new(96)
+// anim layout (f32):
+// 0 last_time  4 blink_next  8 blink_start
+// 12 headx 16 heady 20 velx 24 vely 28 tgtx 32 tgty
+// 36 hairx 40 hairy 44 hvx 48 hvy
+// 52 mouth 56 aspect_view
+let L_MVPISH = 0
+let L_BLINK = 4
+let L_MOUTH = 8
+let L_HEAD = 12
+let L_HAIR = 16
+let L_BREATH = 20
+let L_TEX = 24
+let L_ASPECT = 28
+
+let vs_src = """
+  attribute vec2 a_uv;
+  uniform float u_blink;
+  uniform float u_mouth;
+  uniform vec2 u_head;
+  uniform vec2 u_hair;
+  uniform float u_breath;
+  uniform float u_aspect;   // viewport aspect (w/h)
+  varying vec2 v_uv;
+  // region constants (image UV space; v grows downward)
+  const vec2 EYE_L = vec2(0.230, 0.506);
+  const vec2 EYE_R = vec2(0.473, 0.490);
+  const vec2 EYE_S = vec2(0.085, 0.060);
+  const vec2 MOUTH = vec2(0.336, 0.747);
+  const vec2 NECK  = vec2(0.371, 0.890);
+  const vec2 FACE  = vec2(0.360, 0.500);
+  float g2(vec2 p, vec2 c, vec2 s){
+    vec2 d = (p - c) / s;
+    return exp(-dot(d, d));
+  }
+  void main() {
+    vec2 uv = a_uv;
+    v_uv = uv;
+    vec2 p = uv;
+    // blink: squash towards the lid line inside each eye gaussian
+    float wl = g2(p, EYE_L, EYE_S);
+    float wr = g2(p, EYE_R, EYE_S);
+    p.y += u_blink * wl * (EYE_L.y - 0.012 - p.y) * 0.9;
+    p.y += u_blink * wr * (EYE_R.y - 0.012 - p.y) * 0.9;
+    // mouth: open by stretching below the mouth centre
+    float wm = g2(p, MOUTH, vec2(0.055, 0.045));
+    p.y += u_mouth * wm * max(p.y - MOUTH.y + 0.012, 0.0) * 1.6;
+    // head sway: rotate around the neck pivot, weight ramps toward the top
+    float hw = clamp((NECK.y - p.y) / (NECK.y - 0.05), 0.0, 1.0);
+    hw = hw * hw * (3.0 - 2.0 * hw);
+    // hair follows with lag: extra rotation in the outer-hair zone
+    float fd = distance(p * vec2(1.0, 0.8), FACE * vec2(1.0, 0.8));
+    float hairw = clamp((fd - 0.16) / 0.14, 0.0, 1.0) * hw;
+    float ang = u_head.x * hw + (u_hair.x - u_head.x) * hairw;
+    vec2 q = p - NECK;
+    float ca = cos(ang); float sa = sin(ang);
+    p = NECK + vec2(q.x * ca - q.y * sa, q.x * sa + q.y * ca);
+    // nod (vertical) + breath (chest rises below the neck)
+    p.y += (u_head.y * hw + (u_hair.y - u_head.y) * hairw) * 0.05;
+    p.y -= u_breath * 0.006 * clamp((p.y - NECK.y) * 6.0, 0.0, 1.0);
+    // image uv → clip space, aspect-corrected, v flipped
+    vec2 clip = vec2((p.x - 0.5) * 2.0, (0.5 - p.y) * 2.0);
+    clip.x *= 0.814 / u_aspect * 0.95;
+    clip.y *= 0.95;
+    clip.y += 0.02;
+    gl_Position = vec4(clip, 0.0, 1.0);
+  }
+  """
+
+let fs_src = """
+  precision mediump float;
+  varying vec2 v_uv;
+  uniform sampler2D u_tex;
+  void main() {
+    gl_FragColor = texture2D(u_tex, v_uv);
+  }
+  """
+
+fn compile(kind: Int, src: String) -> Int = {
+  let sh = webgl.create_shader(kind)
+  webgl.shader_source(sh, src)
+  webgl.compile_shader(sh)
+  sh
+}
+
+pub fn load_avatar(ptr: Int, len: Int) -> Int = {
+  let tex = webgl.create_texture()
+  webgl.tex_image_2d_encoded(tex, ptr, len)
+  bytes.set_i32_le(g_state, 12, tex)
+  1
+}
+
+pub fn set_pointer(nx: Float, ny: Float) -> Int = {
+  // nx, ny in -1..1 (viewport normalized)
+  bytes.set_f32_le(g_anim, 28, nx * 0.22)
+  bytes.set_f32_le(g_anim, 32, ny * 0.10)
+  0
+}
+
+pub fn set_mouth(v: Float) -> Int = {
+  bytes.set_f32_le(g_anim, 52, v)
+  0
+}
+
+pub fn set_aspect(a: Float) -> Int = {
+  bytes.set_f32_le(g_anim, 56, a)
+  0
+}
+
+pub effect fn render_frame(time: Float) -> Unit = {
+  let last = bytes.read_f32_le(g_anim, 0)
+  bytes.set_f32_le(g_anim, 0, time)
+  let dt = if last > 0.0 and time > last then float.min(time - last, 0.05) else 0.016
+
+  // auto blink
+  var blink = 0.0
+  let bn = bytes.read_f32_le(g_anim, 4)
+  let bs = bytes.read_f32_le(g_anim, 8)
+  if bs < 0.5 and time >= bn then {
+    bytes.set_f32_le(g_anim, 8, time)
+  } else {}
+  let bs2 = bytes.read_f32_le(g_anim, 8)
+  if bs2 > 0.5 then {
+    let t = time - bs2
+    if t < 0.09 then { blink = t / 0.09 }
+    else if t < 0.14 then { blink = 1.0 }
+    else if t < 0.25 then { blink = 1.0 - (t - 0.14) / 0.11 }
+    else {
+      bytes.set_f32_le(g_anim, 8, 0.0)
+      bytes.set_f32_le(g_anim, 4, time + 2.2 + (time * 7.31 - float.floor(time * 7.31)) * 3.0)
+    }
+  } else {}
+
+  // head spring chases pointer target; hair chases head (lower k = lag)
+  let hx = bytes.read_f32_le(g_anim, 12)
+  let hy = bytes.read_f32_le(g_anim, 16)
+  var vx = bytes.read_f32_le(g_anim, 20)
+  var vy = bytes.read_f32_le(g_anim, 24)
+  let tx = bytes.read_f32_le(g_anim, 28)
+  let ty = bytes.read_f32_le(g_anim, 32)
+  vx = (vx + (tx - hx) * 30.0 * dt) * 0.86
+  vy = (vy + (ty - hy) * 30.0 * dt) * 0.86
+  let nhx = hx + vx * dt * 8.0
+  let nhy = hy + vy * dt * 8.0
+  bytes.set_f32_le(g_anim, 12, nhx)
+  bytes.set_f32_le(g_anim, 16, nhy)
+  bytes.set_f32_le(g_anim, 20, vx)
+  bytes.set_f32_le(g_anim, 24, vy)
+  let ax = bytes.read_f32_le(g_anim, 36)
+  let ay = bytes.read_f32_le(g_anim, 40)
+  var avx = bytes.read_f32_le(g_anim, 44)
+  var avy = bytes.read_f32_le(g_anim, 48)
+  avx = (avx + (nhx - ax) * 14.0 * dt) * 0.90
+  avy = (avy + (nhy - ay) * 14.0 * dt) * 0.90
+  let nax = ax + avx * dt * 8.0
+  let nay = ay + avy * dt * 8.0
+  bytes.set_f32_le(g_anim, 36, nax)
+  bytes.set_f32_le(g_anim, 40, nay)
+  bytes.set_f32_le(g_anim, 44, avx)
+  bytes.set_f32_le(g_anim, 48, avy)
+
+  let breath = 0.5 + 0.5 * math.sin(time * 1.1)
+  let mouth = bytes.read_f32_le(g_anim, 52)
+  let aspect = bytes.read_f32_le(g_anim, 56)
+
+  webgl.clear_color(0.08, 0.085, 0.11, 1.0)
+  webgl.clear(webgl.color_buffer_bit())
+  webgl.use_program(bytes.read_i32_le(g_state, 0))
+  webgl.uniform1f(bytes.read_i32_le(g_loc, L_BLINK), blink)
+  webgl.uniform1f(bytes.read_i32_le(g_loc, L_MOUTH), mouth)
+  webgl.uniform2f(bytes.read_i32_le(g_loc, L_HEAD), nhx, nhy)
+  webgl.uniform2f(bytes.read_i32_le(g_loc, L_HAIR), nax, nay)
+  webgl.uniform1f(bytes.read_i32_le(g_loc, L_BREATH), breath)
+  webgl.uniform1f(bytes.read_i32_le(g_loc, L_ASPECT), if aspect > 0.01 then aspect else 1.444)
+  let tex = bytes.read_i32_le(g_state, 12)
+  if tex > 0 then {
+    webgl.active_texture(webgl.texture0())
+    webgl.bind_texture(webgl.texture_2d(), tex)
+    webgl.uniform1i(bytes.read_i32_le(g_loc, L_TEX), 0)
+  } else {}
+  webgl.bind_buffer(webgl.array_buffer(), bytes.read_i32_le(g_state, 4))
+  let posLoc = webgl.get_attrib_location(bytes.read_i32_le(g_state, 0), "a_uv")
+  webgl.vertex_attrib_pointer(posLoc, 2, webgl.gl_float(), 0, 8, 0)
+  webgl.enable_vertex_attrib_array(posLoc)
+  webgl.bind_buffer(webgl.element_array_buffer(), bytes.read_i32_le(g_state, 8))
+  webgl.draw_elements(webgl.triangles(), GRID_W * GRID_H * 6, webgl.unsigned_short(), 0)
+}
+
+effect fn main() -> Unit = {
+  let vs = compile(webgl.vertex_shader(), vs_src)
+  let fs = compile(webgl.fragment_shader(), fs_src)
+  let prog = webgl.create_program()
+  webgl.attach_shader(prog, vs)
+  webgl.attach_shader(prog, fs)
+  webgl.link_program(prog)
+  bytes.set_i32_le(g_state, 0, prog)
+  webgl.use_program(prog)
+  bytes.set_i32_le(g_loc, L_BLINK, webgl.get_uniform_location(prog, "u_blink"))
+  bytes.set_i32_le(g_loc, L_MOUTH, webgl.get_uniform_location(prog, "u_mouth"))
+  bytes.set_i32_le(g_loc, L_HEAD, webgl.get_uniform_location(prog, "u_head"))
+  bytes.set_i32_le(g_loc, L_HAIR, webgl.get_uniform_location(prog, "u_hair"))
+  bytes.set_i32_le(g_loc, L_BREATH, webgl.get_uniform_location(prog, "u_breath"))
+  bytes.set_i32_le(g_loc, L_TEX, webgl.get_uniform_location(prog, "u_tex"))
+  bytes.set_i32_le(g_loc, L_ASPECT, webgl.get_uniform_location(prog, "u_aspect"))
+
+  // grid mesh (uv only)
+  let nv = (GRID_W + 1) * (GRID_H + 1)
+  let verts = bytes.new(nv * 8)
+  var gy = 0
+  while gy <= GRID_H {
+    var gx = 0
+    while gx <= GRID_W {
+      let o = (gy * (GRID_W + 1) + gx) * 8
+      bytes.set_f32_le(verts, o, int.to_float(gx) / int.to_float(GRID_W))
+      bytes.set_f32_le(verts, o + 4, int.to_float(gy) / int.to_float(GRID_H))
+      gx = gx + 1
+    }
+    gy = gy + 1
+  }
+  let idx = bytes.new(GRID_W * GRID_H * 12)
+  var qy = 0
+  var k = 0
+  while qy < GRID_H {
+    var qx = 0
+    while qx < GRID_W {
+      let a = qy * (GRID_W + 1) + qx
+      let b = a + 1
+      let c = a + GRID_W + 1
+      let e = c + 1
+      bytes.set_u16_le(idx, k, a)
+      bytes.set_u16_le(idx, k + 2, c)
+      bytes.set_u16_le(idx, k + 4, b)
+      bytes.set_u16_le(idx, k + 6, b)
+      bytes.set_u16_le(idx, k + 8, c)
+      bytes.set_u16_le(idx, k + 10, e)
+      k = k + 12
+      qx = qx + 1
+    }
+    qy = qy + 1
+  }
+  let vbo = webgl.create_buffer()
+  webgl.bind_buffer(webgl.array_buffer(), vbo)
+  webgl.buffer_data_f32_ptr(webgl.array_buffer(), bytes.data_ptr(verts), nv * 8, webgl.static_draw())
+  let ibo = webgl.create_buffer()
+  webgl.bind_buffer(webgl.element_array_buffer(), ibo)
+  webgl.buffer_data_u16_ptr(webgl.element_array_buffer(), bytes.data_ptr(idx), GRID_W * GRID_H * 12, webgl.static_draw())
+  bytes.set_i32_le(g_state, 4, vbo)
+  bytes.set_i32_le(g_state, 8, ibo)
+  bytes.set_f32_le(g_anim, 4, 1.5)
+  bytes.set_f32_le(g_anim, 56, 1.444)
+  println("avatar2d ready")
+}
