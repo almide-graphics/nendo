@@ -83,7 +83,9 @@
         <h2>顔 <span style="text-transform:none;color:#667">(保存時に形状へベイク)</span></h2><div id="faceparams"></div>
         <h2>姿勢 <span style="text-transform:none;color:#667">(プレビューのみ)</span></h2><div id="poseparams"></div>
       </div>
-      <div class="tab" id="tab-expr"><div id="exprs"></div></div>
+      <div class="tab" id="tab-expr">
+        <div class="crow"><label>自動まばたき</label><input id="autoBlink" type="checkbox" checked style="accent-color:#6c63ff"></div>
+        <div id="exprs"></div></div>
       <div class="tab" id="tab-detail"><div id="morphs"></div></div>
     </div>
     <div id="savebar">
@@ -841,6 +843,8 @@ function applyUrlParams(){
   if(fd&&doc){ fetch(fd).then(r=>r.arrayBuffer()).then(b=>{doPartTransplant(b,"face");const e=q.get("expr");if(e)setTimeout(()=>applyExprString(e),300);}); }
   const cd=q.get("clothdonor");
   if(cd&&doc){ fetch(cd).then(r=>r.arrayBuffer()).then(b=>{doPartTransplant(b,"cloth");const e=q.get("expr");if(e)setTimeout(()=>applyExprString(e),300);}); }
+  if(q.get("blinkdemo"))blinkFast=true;
+  if(q.get("blinkhold"))window.__blinkHold=true;
   const gv=q.get("gravity");
   if(gv)inst.exports.set_spring_tune(parseFloat(gv), parseFloat(q.get("stiff")||"1"));
   const bg=q.get("bg");
@@ -896,6 +900,37 @@ function applyUrlParams(){
     });
   }
 }
+
+// ── idle animation: auto blink ──
+let blinkNext=0,blinkStart=-1,blinkLastW=0,blinkFast=false;
+function blinkTick(){
+  requestAnimationFrame(blinkTick);
+  if(!doc||!inst)return;
+  if(!document.getElementById("autoBlink").checked){
+    if(blinkLastW>0){const e=exprList().find(x=>x.name==="blink");if(e)applyBinds(e.binds,doc.ui.expr.blink||0);blinkLastW=0;}
+    return;
+  }
+  const now=performance.now();
+  if(blinkStart<0&&now>=blinkNext){
+    blinkStart=now;
+    blinkNext=now+(blinkFast?900:2500+Math.random()*3000);
+  }
+  if(blinkStart<0)return;
+  if(window.__blinkHold){const e=exprList().find(x=>x.name==="blink");if(e&&blinkLastW!==1){applyBinds(e.binds,1);blinkLastW=1;}return;}
+  const t=now-blinkStart;
+  const hold=blinkFast?400:60;
+  let w;
+  if(t<90)w=t/90;
+  else if(t<90+hold)w=1;
+  else if(t<90+hold+110)w=1-(t-90-hold)/110;
+  else {w=doc.ui.expr.blink||0;blinkStart=-1;}
+  if(Math.abs(w-blinkLastW)>0.01){
+    const e=exprList().find(x=>x.name==="blink");
+    if(e)applyBinds(e.binds,Math.max(w,doc.ui.expr.blink||0));
+    blinkLastW=w;
+  }
+}
+requestAnimationFrame(blinkTick);
 
 // ── parts transplant ──
 function applyExprString(expr){
