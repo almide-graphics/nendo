@@ -145,8 +145,13 @@ function transplantParts(recBuf,donBuf,category){
   const dHm=pHumanoid(dj), rHm=pHumanoid(rj);
   const anchor=CAT.anchor;
   if(dHm[anchor]==null||rHm[anchor]==null)throw new Error("humanoid "+anchor+" が見つかりません");
-  const T=m4Mul(pNodeWorld(rj,rHm[anchor]),m4Inv(pNodeWorld(dj,dHm[anchor])));
-  const Tinv=m4Inv(T);
+  // Rest-pose bone ORIENTATIONS differ between models (e.g. unnormalized
+  // VRM rest poses carry big rotations) while the posed geometry is upright
+  // in both. So geometry moves by TRANSLATION ONLY, and each joint gets an
+  // exact per-joint inverse bind: ibm'(j) = R(j)^-1 · T · worldDon(j) · ibm(j)
+  // where R(j) is the joint's world AFTER attachment as the runtime sees it.
+  const dA=pNodeWorld(dj,dHm[anchor]), rA=pNodeWorld(rj,rHm[anchor]);
+  const T=[1,0,0,0, 0,1,0,0, 0,0,1,0, rA[12]-dA[12], rA[13]-dA[13], rA[14]-dA[14], 1];
   const donorRole={};for(const[role,n]of Object.entries(dHm))donorRole[n]=role;
 
   // ── 4. copy needed donor nodes (non-role joints + ancestors up to a role) ──
@@ -176,20 +181,40 @@ function transplantParts(recBuf,donBuf,category){
     (rj.nodes[attach].children=rj.nodes[attach].children||[]).push(myNew);
   });
 
-  // ── 5. rebuild each donor skin in recipient space ──
+  // ── 5. rebuild each donor skin: per-joint exact inverse binds ──
+  // R for copied nodes: runtime world = R(parent) · donorLocal(node);
+  // for role-mapped nodes: R = recipient's own world.
+  const dLocal=i=>{const nd=dj.nodes[i];return m4FromTRS(nd.translation||[0,0,0],nd.rotation||[0,0,0,1],nd.scale||[1,1,1]);};
+  const Rmap=new Map(); // donor node idx → R (world after attachment)
+  const recWorldCache=new Map();
+  const recWorld=ni=>{if(!recWorldCache.has(ni))recWorldCache.set(ni,pNodeWorld(rj,ni));return recWorldCache.get(ni);};
+  order.forEach(dn=>{
+    const p=dParent[dn];
+    let base;
+    if(p>=0&&Rmap.has(p))base=Rmap.get(p);
+    else if(p>=0&&donorRole[p]!=null&&rHm[donorRole[p]]!=null)base=recWorld(rHm[donorRole[p]]);
+    else base=recWorld(rHm[anchor]);
+    Rmap.set(dn,m4Mul(base,dLocal(dn)));
+  });
+  const Rof=jn=>{
+    if(Rmap.has(jn))return Rmap.get(jn);
+    const role=donorRole[jn];
+    return recWorld(role!=null&&rHm[role]!=null?rHm[role]:rHm[anchor]);
+  };
   const skinMap=new Map(); // donor skin idx → recipient skin idx
   skinIdxs.forEach(si=>{
     const sk=dj.skins[si];
     const joints=sk.joints.map(jn=>{
       if(nodeMap.has(jn))return nodeMap.get(jn);
-      // role joint missing in recipient: degrade to head
       return rHm[donorRole[jn]]!=null?rHm[donorRole[jn]]:rHm[anchor];
     });
     const ibm=new Float32Array(pAccBytes(D,sk.inverseBindMatrices).buffer);
     const out=new Float32Array(ibm.length);
     for(let j=0;j<sk.joints.length;j++){
       const m=Array.from(ibm.subarray(j*16,j*16+16));
-      out.set(m4Mul(m,Tinv),j*16);
+      const jn=sk.joints[j];
+      const corr=m4Mul(m4Inv(Rof(jn)),m4Mul(T,pNodeWorld(dj,jn)));
+      out.set(m4Mul(corr,m),j*16);
     }
     const bvi=addBv(new Uint8Array(out.buffer));
     rj.accessors.push({bufferView:bvi,componentType:5126,count:sk.joints.length,type:"MAT4"});
@@ -229,14 +254,15 @@ function transplantParts(recBuf,donBuf,category){
     matMap.set(mi,rj.materials.length-1);return rj.materials.length-1;};
 
   // ── 7. geometry: copy accessors (POSITION transformed by T) ──
-  const accCopy=(ai,kind)=>{
+  const accCopy=(ai,kind,applyT)=>{
     const a=dj.accessors[ai];
     let bytes=pAccBytes(D,ai);
     if(kind==="pos"||kind==="norm"){
       const f=new Float32Array(bytes.buffer,bytes.byteOffset,a.count*3);
       const mn=[1/0,1/0,1/0],mx=[-1/0,-1/0,-1/0];
       for(let i=0;i<a.count;i++){
-        const v=kind==="pos"?m4Point(T,f[i*3],f[i*3+1],f[i*3+2]):m4Dir(T,f[i*3],f[i*3+1],f[i*3+2]);
+        let v=[f[i*3],f[i*3+1],f[i*3+2]];
+        if(applyT)v=kind==="pos"?m4Point(T,v[0],v[1],v[2]):m4Dir(T,v[0],v[1],v[2]);
         f[i*3]=v[0];f[i*3+1]=v[1];f[i*3+2]=v[2];
         for(let c=0;c<3;c++){mn[c]=Math.min(mn[c],v[c]);mx[c]=Math.max(mx[c],v[c]);}
       }
@@ -251,8 +277,9 @@ function transplantParts(recBuf,donBuf,category){
   const donorMeshNewNode=new Map(); // donor mesh idx → [new node idx]
   hairPrims.forEach((h,k)=>{
     const a=h.prim.attributes;
-    const attrs={POSITION:accCopy(a.POSITION,"pos")};
-    if(a.NORMAL!=null)attrs.NORMAL=accCopy(a.NORMAL,"norm");
+    const skinned=h.skinIdx!=null&&skinMap.has(h.skinIdx);
+    const attrs={POSITION:accCopy(a.POSITION,"pos",!skinned)};
+    if(a.NORMAL!=null)attrs.NORMAL=accCopy(a.NORMAL,"norm",!skinned);
     if(a.TEXCOORD_0!=null)attrs.TEXCOORD_0=accCopy(a.TEXCOORD_0);
     if(a.JOINTS_0!=null)attrs.JOINTS_0=accCopy(a.JOINTS_0);
     if(a.WEIGHTS_0!=null)attrs.WEIGHTS_0=accCopy(a.WEIGHTS_0);
