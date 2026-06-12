@@ -60,25 +60,25 @@ let g_mt_w = bytes.new(131072)     // f32 weight
 // skin palettes and the compose scratch live in the pool too. Bone params are
 // per-node overrides: scale multiplies S, offset adds to T — that is the whole
 // "body parameter" mechanism (VRoid-style 身長/頭/肩幅 ride on these).
-let MAX_NODES = 512
+let MAX_NODES = 1024
 let NODE_BLOB = 44
 let g_skel = bytes.new(16)          // [n_nodes][nodes_ptr][world_ptr][tmp_ptr]
-let g_node_scale = bytes.new(6144)  // 512 x 3 f32 (default 1)
-let g_node_off = bytes.new(6144)    // 512 x 3 f32 (default 0)
-let g_node_rot = bytes.new(8192)    // 512 x quat f32x4 pose override (default identity)
+let g_node_scale = bytes.new(12288)  // 512 x 3 f32 (default 1)
+let g_node_off = bytes.new(12288)    // 512 x 3 f32 (default 0)
+let g_node_rot = bytes.new(16384)    // 512 x quat f32x4 pose override (default identity)
 
 // view settings: [sun dx,dy,dz][bg r,g,b] f32 x6
 let g_view = bytes.new(24)
 
-let MAX_SKINS = 16
+let MAX_SKINS = 64
 // per skin: [n_joints:i32][joints_ptr:i32][ibm_ptr:i32][palette_ptr:i32]
-let g_skins = bytes.new(256)
+let g_skins = bytes.new(1024)
 let g_n_skins = bytes.new(4)
 // per prim: [sid:i32][jw_ptr:i32]  (jw: per vertex u16x4 joints + f32x4 weights = 24B)
 let g_prim_skin = bytes.new(4096)
 
 // glTF original node index → topo slot (-1 = none); filled by the Almide loader
-let g_slotmap = bytes.new(2048)
+let g_slotmap = bytes.new(4096)
 // mesh index → skin sid (-1 = unskinned); filled by the Almide loader
 let g_meshskin = bytes.new(256)
 
@@ -94,7 +94,7 @@ let g_spring = bytes.new(20)
 // live physics tuning: [gravity_add:f32][stiffness_mul:f32]
 let g_spring_tune = bytes.new(8)
 // extra per-node quat layer applied after pose: q_base x q_pose x q_spring
-let g_spring_rot = bytes.new(8192)
+let g_spring_rot = bytes.new(16384)
 
 // column-major mat4 multiply on g_pool offsets: D = A * B (D must not alias)
 fn m4_mul(d: Int, a: Int, b: Int) -> Unit = {
@@ -1383,6 +1383,12 @@ pub fn spring_tick(dt: Float) -> Int = {
 //   iptr  : raw ptr to icount*2 bytes of u16 indices
 //   img_* : encoded base-color image bytes (img_len 0 = untextured)
 pub fn reset_prims() -> Int = {
+  // a reload window must not leave stale skeleton/spring state visible to the
+  // concurrently-running render loop (rAF keeps firing during openDocument)
+  bytes.set_i32_le(g_spring, 0, 0)
+  bytes.set_f32_le(g_spring, 16, 0.0)
+  bytes.set_i32_le(g_skel, 0, 0)
+  bytes.set_i32_le(g_n_skins, 0, 0)
   bytes.set_i32_le(g_n_prims, 0, 0)
   0
 }

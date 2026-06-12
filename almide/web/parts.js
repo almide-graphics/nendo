@@ -90,9 +90,10 @@ function transplantHair(recBuf,donBuf){return transplantParts(recBuf,donBuf,"hai
 
 // ── the transplant ──
 // recBuf/donBuf: ArrayBuffers. Returns a new ArrayBuffer (valid VRM).
-function transplantParts(recBuf,donBuf,category){
+function transplantParts(recBuf,donBuf,category,opts){
   const CAT=PART_CATEGORIES[category];
   if(!CAT)throw new Error("unknown category "+category);
+  const addOnly=!!(opts&&opts.add);
   const R=pGlb(recBuf), D=pGlb(donBuf);
   const rj=JSON.parse(JSON.stringify(R.json)); // deep clone, we mutate freely
   const dj=D.json;
@@ -106,7 +107,7 @@ function transplantParts(recBuf,donBuf,category){
   const addBv=(bytes)=>{rj.bufferViews.push({buffer:0,byteOffset:0,byteLength:bytes.length});srcOf.set(rj.bufferViews.length-1,bytes);return rj.bufferViews.length-1;};
 
   // ── 1. strip recipient parts of this category (prims + matching springs) ──
-  rj.meshes.forEach(m=>{
+  if(!addOnly)rj.meshes.forEach(m=>{
     const kept=m.primitives.filter(p=>!hairMat(rj,p.material));
     if(kept.length!==m.primitives.length&&kept.length&&m.primitives[0].targets){
       // glTF: all prims of a mesh share the weights array; keeping a subset is fine
@@ -124,7 +125,7 @@ function transplantParts(recBuf,donBuf,category){
     });
   }
   const rsb=(rj.extensions||{}).VRMC_springBone;
-  const springKill=category==="hair"?/hair/i:category==="cloth"?/skirt|coat|cloth|sode|sleeve/i:null;
+  const springKill=addOnly?null:category==="hair"?/hair/i:category==="cloth"?/skirt|coat|cloth|sode|sleeve/i:null;
   if(rsb&&rsb.springs&&springKill){
     rsb.springs=rsb.springs.filter(s=>{
       const names=(s.joints||[]).map(jt=>(rj.nodes[jt.node]||{}).name||"");
@@ -158,11 +159,33 @@ function transplantParts(recBuf,donBuf,category){
   const dParent=new Array(dj.nodes.length).fill(-1);
   dj.nodes.forEach((nd,i)=>(nd.children||[]).forEach(c=>dParent[c]=i));
   const skinIdxs=[...new Set(hairPrims.map(h=>h.skinIdx))].filter(s=>s!=null);
+  // copy ONLY joints that real vertex weights touch (exporters often list the
+  // whole armature in skin.joints — copying it all bloats the file and can
+  // blow the runtime node budget)
+  const usedJoints=new Map(); // skinIdx → Set(joint array index)
+  skinIdxs.forEach(si=>usedJoints.set(si,new Set()));
+  hairPrims.forEach(h=>{
+    if(h.skinIdx==null)return;
+    const a=h.prim.attributes;
+    if(a.JOINTS_0==null||a.WEIGHTS_0==null)return;
+    const J=pAccBytes(D,a.JOINTS_0), W=pAccBytes(D,a.WEIGHTS_0);
+    const ja=dj.accessors[a.JOINTS_0], wa=dj.accessors[a.WEIGHTS_0];
+    const jcs=pComp(ja.componentType), wct=wa.componentType;
+    const jv=jcs===1?J:jcs===2?new Uint16Array(J.buffer,J.byteOffset,ja.count*4):new Uint32Array(J.buffer,J.byteOffset,ja.count*4);
+    const wv=wct===5126?new Float32Array(W.buffer,W.byteOffset,wa.count*4)
+            :wct===5123?new Uint16Array(W.buffer,W.byteOffset,wa.count*4):W;
+    const set=usedJoints.get(h.skinIdx);
+    for(let i=0;i<ja.count*4;i++)if(wv[i]>0)set.add(jv[i]);
+  });
   const toCopy=new Set();
-  skinIdxs.forEach(si=>dj.skins[si].joints.forEach(jn=>{
-    let c=jn;
-    while(c>=0&&donorRole[c]==null&&!toCopy.has(c)){toCopy.add(c);c=dParent[c];}
-  }));
+  skinIdxs.forEach(si=>{
+    const used=usedJoints.get(si);
+    dj.skins[si].joints.forEach((jn,k)=>{
+      if(used.size&&!used.has(k))return;
+      let c=jn;
+      while(c>=0&&donorRole[c]==null&&!toCopy.has(c)){toCopy.add(c);c=dParent[c];}
+    });
+  });
   const nodeMap=new Map(); // donor node → recipient node index
   for(const[role,n]of Object.entries(dHm))if(rHm[role]!=null)nodeMap.set(n,rHm[role]);
   const order=[...toCopy].sort((a,b)=>a-b);
