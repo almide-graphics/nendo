@@ -11,9 +11,9 @@ let GRID_H = 60
 let IMG_ASPECT = 0.814
 
 // ── state ──
-let g_state = bytes.new(16)    // [prog][vbo][ibo][tex]
-let g_loc = bytes.new(64)      // uniform locations
-let g_anim = bytes.new(96)
+var g_state = bytes.new(16)    // [prog][vbo][ibo][tex]
+var g_loc = bytes.new(64)      // uniform locations
+var g_anim = bytes.new(96)
 // anim layout (f32):
 // 0 last_time  4 blink_next  8 blink_start
 // 12 headx 16 heady 20 velx 24 vely 28 tgtx 32 tgty

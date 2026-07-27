@@ -76,7 +76,7 @@ effect fn save(glb: GlbFile, path: String) -> Result[Unit, String] = {
 
   let total = 12 + 8 + json_len + (if has_bin then 8 + bin_total else 0)
 
-  let out = bytes.new(0)
+  var out = bytes.new(0)
 
   bytes.append_u32_le(out, GLB_MAGIC)
   bytes.append_u32_le(out, 2)
