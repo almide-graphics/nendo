@@ -22,32 +22,32 @@ type GlbFile = {
 
 fn glb_parse(data: Bytes) -> Result[GlbFile, String] = {
   guard bytes.len(data) >= 12 else err("too small")
-  let magic = bytes.read_u32_le(data, 0)
+  let magic = bytes.get_u32_le(data, 0) ?? 0
   guard magic == GLB_MAGIC else err("not GLB")
-  let total_length = bytes.read_u32_le(data, 8)
+  let total_length = bytes.get_u32_le(data, 8) ?? 0
 
   var offset = 12
   var json_val: Option[json.Value] = none
-  var bin_bytes: Bytes = bytes.new(0)
+  var bin_bytes: Bytes = bytes.zeros(0)
 
   while offset + 8 <= int.min(total_length, bytes.len(data)) {
-    let chunk_len = bytes.read_u32_le(data, offset)
-    let chunk_type = bytes.read_u32_le(data, offset + 4)
+    let chunk_len = bytes.get_u32_le(data, offset) ?? 0
+    let chunk_type = bytes.get_u32_le(data, offset + 4) ?? 0
     offset = offset + 8
     let end = int.min(offset + chunk_len, bytes.len(data))
 
     if chunk_type == CHUNK_JSON then {
       let chunk_slice = bytes.slice(data, offset, end)
       // Debug: check raw bytes before string conversion
-      let b0 = bytes.get_or(chunk_slice, 0, -1)
-      let b1 = bytes.get_or(chunk_slice, 1, -1)
-      let b2 = bytes.get_or(chunk_slice, 2, -1)
-      let b3 = bytes.get_or(chunk_slice, 3, -1)
+      let b0 = bytes.get(chunk_slice, 0) ?? -1
+      let b1 = bytes.get(chunk_slice, 1) ?? -1
+      let b2 = bytes.get(chunk_slice, 2) ?? -1
+      let b3 = bytes.get(chunk_slice, 3) ?? -1
       let json_str = bytes.to_string_lossy(chunk_slice)
       let first10 = string.slice(json_str, 0, 10)
       match json.parse(json_str) {
         ok(v) => { json_val = some(v) },
-        err(e) => { json_val = some(json.object([("__parse_error", json.from_string(e)), ("__chunk_len", json.from_int(chunk_len)), ("__str_len", json.from_int(string.len(json_str))), ("__bytes", json.from_string(int.to_string(b0) + "," + int.to_string(b1) + "," + int.to_string(b2) + "," + int.to_string(b3))), ("__first10", json.from_string(first10))])) },
+        err(e) => { json_val = some(value.object([("__parse_error", value.string(e)), ("__chunk_len", value.int(chunk_len)), ("__str_len", value.int(string.len(json_str))), ("__bytes", value.string(int.to_string(b0) + "," + int.to_string(b1) + "," + int.to_string(b2) + "," + int.to_string(b3))), ("__first10", value.string(first10))])) },
       }
     } else if chunk_type == CHUNK_BIN then {
       bin_bytes = bytes.slice(data, offset, end)
@@ -58,7 +58,7 @@ fn glb_parse(data: Bytes) -> Result[GlbFile, String] = {
 
   match json_val {
     some(j) => ok(GlbFile { json_data: j, bin_data: bin_bytes }),
-    none => err("no JSON chunk found after scanning " + int.to_string(offset - 12) + " bytes, total_length=" + int.to_string(bytes.read_u32_le(data, 8))),
+    none => err("no JSON chunk found after scanning " + int.to_string(offset - 12) + " bytes, total_length=" + int.to_string(bytes.get_u32_le(data, 8) ?? 0)),
   }
 }
 
@@ -70,12 +70,12 @@ type VrmVersion =
   | VUnknown
 
 fn detect_version(j: json.Value) -> VrmVersion = {
-  let ext = json.get(j, "extensions")
+  let ext = value.get(j, "extensions")
   match ext {
     none => VUnknown,
     some(e) =>
-      if option.is_some(json.get(e, "VRMC_vrm")) then V1
-      else if option.is_some(json.get(e, "VRM")) then V0
+      if option.is_some(value.get(e, "VRMC_vrm")) then V1
+      else if option.is_some(value.get(e, "VRM")) then V0
       else VUnknown,
   }
 }
@@ -84,25 +84,25 @@ fn version_string(v: VrmVersion) -> String =
   match v { V0 => "0.x", V1 => "1.0", VUnknown => "unknown" }
 
 fn vrm_root(j: json.Value, v: VrmVersion) -> Option[json.Value] =
-  match json.get(j, "extensions") {
+  match value.get(j, "extensions") {
     none => none,
     some(ext) => match v {
-      V1 => json.get(ext, "VRMC_vrm"),
-      V0 => json.get(ext, "VRM"),
+      V1 => value.get(ext, "VRMC_vrm"),
+      V0 => value.get(ext, "VRM"),
       VUnknown => none,
     },
   }
 
 fn count(j: json.Value, key: String) -> Int =
-  match json.get_array(j, key) { some(a) => list.len(a), none => 0 }
+  match value.get_array(j, key) { some(a) => list.len(a), none => 0 }
 
 fn vrm_title(j: json.Value, v: VrmVersion) -> String =
   match vrm_root(j, v) {
     none => "",
     some(root) => {
       let key = if v == V1 then "name" else "title"
-      match json.get(root, "meta") {
-        some(m) => option.unwrap_or(json.get_string(m, key), ""),
+      match value.get(root, "meta") {
+        some(m) => option.unwrap_or(value.get_string(m, key), ""),
         none => "",
       }
     },
@@ -111,14 +111,14 @@ fn vrm_title(j: json.Value, v: VrmVersion) -> String =
 fn vrm_author(j: json.Value, v: VrmVersion) -> String =
   match vrm_root(j, v) {
     none => "",
-    some(root) => match json.get(root, "meta") {
+    some(root) => match value.get(root, "meta") {
       none => "",
       some(m) => match v {
-        V1 => match json.get_array(m, "authors") {
-          some(arr) => list.join(list.filter_map(arr, json.as_string), ", "),
+        V1 => match value.get_array(m, "authors") {
+          some(arr) => list.join(list.filter_map(arr, (x) => value.as_string(x)?), ", "),
           none => "",
         },
-        _ => option.unwrap_or(json.get_string(m, "author"), ""),
+        _ => option.unwrap_or(value.get_string(m, "author"), ""),
       },
     },
   }
@@ -127,18 +127,18 @@ fn vrm_author(j: json.Value, v: VrmVersion) -> String =
 
 pub fn inspect(data: Bytes) -> String = {
   match glb_parse(data) {
-    err(e) => json.stringify(json.object([("error", json.from_string(e))])),
+    err(e) => json.stringify(value.object([("error", value.string(e))])),
     ok(g) => {
       let v = detect_version(g.json_data)
-      json.stringify(json.object([
-        ("version", json.from_string(version_string(v))),
-        ("title", json.from_string(vrm_title(g.json_data, v))),
-        ("author", json.from_string(vrm_author(g.json_data, v))),
-        ("meshes", json.from_int(count(g.json_data, "meshes"))),
-        ("nodes", json.from_int(count(g.json_data, "nodes"))),
-        ("materials", json.from_int(count(g.json_data, "materials"))),
-        ("textures", json.from_int(count(g.json_data, "textures"))),
-        ("images", json.from_int(count(g.json_data, "images"))),
+      json.stringify(value.object([
+        ("version", value.string(version_string(v))),
+        ("title", value.string(vrm_title(g.json_data, v))),
+        ("author", value.string(vrm_author(g.json_data, v))),
+        ("meshes", value.int(count(g.json_data, "meshes"))),
+        ("nodes", value.int(count(g.json_data, "nodes"))),
+        ("materials", value.int(count(g.json_data, "materials"))),
+        ("textures", value.int(count(g.json_data, "textures"))),
+        ("images", value.int(count(g.json_data, "images"))),
       ]))
     },
   }
@@ -153,12 +153,12 @@ pub fn get_json(data: Bytes) -> String = {
 
 pub fn validate(data: Bytes) -> String = {
   match glb_parse(data) {
-    err(e) => json.stringify(json.object([("valid", json.from_bool(false)), ("error", json.from_string(e))])),
+    err(e) => json.stringify(value.object([("valid", value.bool(false)), ("error", value.string(e))])),
     ok(g) => {
       let v = detect_version(g.json_data)
-      json.stringify(json.object([
-        ("valid", json.from_bool(count(g.json_data, "meshes") > 0 and count(g.json_data, "nodes") > 0)),
-        ("version", json.from_string(version_string(v))),
+      json.stringify(value.object([
+        ("valid", value.bool(count(g.json_data, "meshes") > 0 and count(g.json_data, "nodes") > 0)),
+        ("version", value.string(version_string(v))),
       ]))
     },
   }
@@ -168,10 +168,10 @@ pub fn validate(data: Bytes) -> String = {
 
 pub effect fn load_vrm_3d(data: Bytes) -> String = {
   match glb_parse(data) {
-    err(e) => json.stringify(json.object([("ok", json.from_bool(false)), ("error", json.from_string(e))])),
+    err(e) => json.stringify(value.object([("ok", value.bool(false)), ("error", value.string(e))])),
     ok(g) => match render.load_from_glb(render.GlbData { json_data: g.json_data, bin_data: g.bin_data }) {
-      ok(count) => json.stringify(json.object([("ok", json.from_bool(true)), ("meshes", json.from_int(count))])),
-      err(e) => json.stringify(json.object([("ok", json.from_bool(false)), ("error", json.from_string(e))])),
+      ok(count) => json.stringify(value.object([("ok", value.bool(true)), ("meshes", value.int(count))])),
+      err(e) => json.stringify(value.object([("ok", value.bool(false)), ("error", value.string(e))])),
     },
   }
 }
@@ -187,7 +187,7 @@ pub effect fn on_wheel(delta_y: Float) -> Unit = render.on_wheel(delta_y)
 
 pub effect fn test_render() -> String = {
   obsid.create_mesh(0)
-  let verts = bytes.new(0)
+  let verts = bytes.zeros(0)
   // 3 vertices × 11 floats (pos+norm+color+uv)
   // v0: (0,0,0)
   bytes.append_f32_le(verts, 0.0); bytes.append_f32_le(verts, 0.0); bytes.append_f32_le(verts, 0.0)
@@ -205,7 +205,7 @@ pub effect fn test_render() -> String = {
   bytes.append_f32_le(verts, 0.0); bytes.append_f32_le(verts, 0.0); bytes.append_f32_le(verts, 1.0)
   bytes.append_f32_le(verts, 0.0); bytes.append_f32_le(verts, 0.0)
 
-  let idx = bytes.new(0)
+  let idx = bytes.zeros(0)
   bytes.append_u16_le(idx, 0); bytes.append_u16_le(idx, 1); bytes.append_u16_le(idx, 2)
 
   obsid.upload_mesh(0, bytes.data_ptr(verts), 3, bytes.data_ptr(idx), 3)
@@ -228,7 +228,7 @@ test "inspect valid GLB" {
   let jb = bytes.from_string(json_str)
   let jlen = bytes.len(jb)
   let total = 12 + 8 + jlen
-  let data = bytes.new(0)
+  let data = bytes.zeros(0)
   bytes.append_u32_le(data, 0x46546C67)
   bytes.append_u32_le(data, 2)
   bytes.append_u32_le(data, total)
@@ -236,7 +236,7 @@ test "inspect valid GLB" {
   bytes.append_u32_le(data, 0x4E4F534A)
   var i = 0
   while i < bytes.len(jb) {
-    bytes.push(data, bytes.get_or(jb, i, 0))
+    bytes.push(data, bytes.get(jb, i) ?? 0)
     i = i + 1
   }
   let result = inspect(data)

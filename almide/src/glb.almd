@@ -16,7 +16,7 @@ type GlbFile = {
 // ---- Load ----
 
 effect fn load(path: String) -> Result[GlbFile, String] = {
-  let data = match fs.read_bytes_raw(path) {
+  let data = match fs.read_bytes(path) {
     ok(d) => d,
     err(e) => err(e),
   }
@@ -26,18 +26,18 @@ effect fn load(path: String) -> Result[GlbFile, String] = {
 fn parse(data: Bytes) -> Result[GlbFile, String] = {
   guard bytes.len(data) >= 12 else err("too small")
 
-  let magic = bytes.read_u32_le(data, 0)
+  let magic = bytes.get_u32_le(data, 0) ?? 0
   guard magic == GLB_MAGIC else err("not GLB")
 
-  let total_length = bytes.read_u32_le(data, 8)
+  let total_length = bytes.get_u32_le(data, 8) ?? 0
 
   var offset = 12
   var json_val: Option[json.Value] = none
-  var bin_bytes: Bytes = bytes.new(0)
+  var bin_bytes: Bytes = bytes.zeros(0)
 
   while offset + 8 <= int.min(total_length, bytes.len(data)) {
-    let chunk_len = bytes.read_u32_le(data, offset)
-    let chunk_type = bytes.read_u32_le(data, offset + 4)
+    let chunk_len = bytes.get_u32_le(data, offset) ?? 0
+    let chunk_type = bytes.get_u32_le(data, offset + 4) ?? 0
     offset = offset + 8
     let end = int.min(offset + chunk_len, bytes.len(data))
 
@@ -67,7 +67,7 @@ effect fn save(glb: GlbFile, path: String) -> Result[Unit, String] = {
   let json_bytes = bytes.from_string(json_str)
 
   let json_pad = (4 - bytes.len(json_bytes) % 4) % 4
-  let json_padded = if json_pad > 0 then bytes.concat(json_bytes, bytes.from_string(string.repeat(" ", json_pad))) else json_bytes
+  let json_padded = if json_pad > 0 then (json_bytes + bytes.from_string(string.repeat(" ", json_pad))) else json_bytes
   let json_len = bytes.len(json_padded)
 
   let has_bin = bytes.len(glb.bin_data) > 0
@@ -76,7 +76,7 @@ effect fn save(glb: GlbFile, path: String) -> Result[Unit, String] = {
 
   let total = 12 + 8 + json_len + (if has_bin then 8 + bin_total else 0)
 
-  var out = bytes.new(0)
+  var out = bytes.zeros(0)
 
   bytes.append_u32_le(out, GLB_MAGIC)
   bytes.append_u32_le(out, 2)
@@ -87,7 +87,7 @@ effect fn save(glb: GlbFile, path: String) -> Result[Unit, String] = {
   // Append json_padded byte by byte
   var i = 0
   while i < bytes.len(json_padded) {
-    bytes.push(out, bytes.get_or(json_padded, i, 0))
+    bytes.push(out, bytes.get(json_padded, i) ?? 0)
     i = i + 1
   }
 
@@ -96,7 +96,7 @@ effect fn save(glb: GlbFile, path: String) -> Result[Unit, String] = {
     bytes.append_u32_le(out, CHUNK_BIN)
     var j = 0
     while j < bytes.len(glb.bin_data) {
-      bytes.push(out, bytes.get_or(glb.bin_data, j, 0))
+      bytes.push(out, bytes.get(glb.bin_data, j) ?? 0)
       j = j + 1
     }
     var k = 0
@@ -106,13 +106,13 @@ effect fn save(glb: GlbFile, path: String) -> Result[Unit, String] = {
     }
   } else {}
 
-  fs.write_bytes_raw(path, out)
+  fs.write_bytes(path, out)
 }
 
 // ---- Image operations ----
 
 fn extract_image(glb: GlbFile, image_index: Int) -> Result[Bytes, String] = {
-  let images = match json.get_array(glb.json_data, "images") {
+  let images = match value.get_array(glb.json_data, "images") {
     some(i) => i,
     none => err("no images"),
   }
@@ -120,11 +120,11 @@ fn extract_image(glb: GlbFile, image_index: Int) -> Result[Bytes, String] = {
     some(i) => i,
     none => err("image index out of range"),
   }
-  let bv_idx = match json.get_int(img, "bufferView") {
+  let bv_idx = match value.get_int(img, "bufferView") {
     some(i) => i,
     none => err("no bufferView"),
   }
-  let bvs = match json.get_array(glb.json_data, "bufferViews") {
+  let bvs = match value.get_array(glb.json_data, "bufferViews") {
     some(b) => b,
     none => err("no bufferViews"),
   }
@@ -132,8 +132,8 @@ fn extract_image(glb: GlbFile, image_index: Int) -> Result[Bytes, String] = {
     some(b) => b,
     none => err("bufferView out of range"),
   }
-  let offset = option.unwrap_or(json.get_int(bv, "byteOffset"), 0)
-  let length = match json.get_int(bv, "byteLength") {
+  let offset = option.unwrap_or(value.get_int(bv, "byteOffset"), 0)
+  let length = match value.get_int(bv, "byteLength") {
     some(l) => l,
     none => err("no byteLength"),
   }

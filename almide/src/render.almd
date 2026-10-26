@@ -12,7 +12,7 @@ type GlbData = { json_data: json.Value, bin_data: Bytes }
 
 // Upload meshes from parsed GLB to obsid and set up scene.
 pub effect fn load_from_glb(g: GlbData) -> Result[Int, String] = {
-  let mesh_count = match json.get_array(g.json_data, "meshes") {
+  let mesh_count = match value.get_array(g.json_data, "meshes") {
     some(m) => list.len(m),
     none => 0,
   }

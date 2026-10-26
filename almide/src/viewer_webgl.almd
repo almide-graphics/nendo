@@ -24,7 +24,7 @@ import json
 let STRIDE = 44   // pos(3)@0 norm(3)@12 color(3)@24 uv(2)@36
 
 // ── Globals ──
-var g_n_prims = bytes.new(4)
+var g_n_prims = bytes.zeros(4)
 let MAX_PRIMS = 512
 // per-prim: [vbo:i32][ibo:i32][idx_count:i32][tex:i32][sr:f32][sg:f32][sb:f32]
 //           [alpha_mode:i32][ow:f32][or:f32][og:f32][ob:f32]
@@ -34,11 +34,11 @@ let MAX_PRIMS = 512
 //   three-vrm only draws outlines for materials that opt in)
 //   vptr/work_ptr are absolute addresses INSIDE g_pool (see below)
 let PRIM_STRIDE = 64
-var g_prim_meta = bytes.new(32768)
+var g_prim_meta = bytes.zeros(32768)
 // per-prim MToon params, 48B:
 // [shift][toony][em rgb][rim rgb][rimPow][rimLift][shadeTex:i32][emTex:i32]
 let MTOON_BLOB = 48
-var g_prim_mtoon = bytes.new(24576)
+var g_prim_mtoon = bytes.zeros(24576)
 
 // ── Geometry/morph pool ──
 // One big static Bytes the JS host writes vertex + morph-delta data into via
@@ -46,13 +46,13 @@ var g_prim_mtoon = bytes.new(24576)
 // the blend math with the safe bytes API (no RawPtr bridge on wasm, #440),
 // and the backing memory is never RC-managed per-allocation.
 let POOL_SIZE = 50331648   // 48 MiB (Almaid face: 8 prims x 57 targets fits)
-var g_pool = bytes.new(50331648)
-var g_pool_used = bytes.new(4)
+var g_pool = bytes.zeros(50331648)
+var g_pool_used = bytes.zeros(4)
 
 // morph tables: [pid * MAX_TARGETS + ti]
 let MAX_TARGETS = 64
-var g_mt_ptr = bytes.new(131072)   // i32 absolute delta ptr (xyz f32 per vertex)
-var g_mt_w = bytes.new(131072)     // f32 weight
+var g_mt_ptr = bytes.zeros(131072)   // i32 absolute delta ptr (xyz f32 per vertex)
+var g_mt_w = bytes.zeros(131072)     // f32 weight
 
 // ── Skinning ──
 // Skeleton nodes arrive topologically sorted (parent before child) as a pool
@@ -62,25 +62,25 @@ var g_mt_w = bytes.new(131072)     // f32 weight
 // "body parameter" mechanism (VRoid-style 身長/頭/肩幅 ride on these).
 let MAX_NODES = 1024
 let NODE_BLOB = 44
-var g_skel = bytes.new(16)          // [n_nodes][nodes_ptr][world_ptr][tmp_ptr]
-var g_node_scale = bytes.new(12288)  // 512 x 3 f32 (default 1)
-var g_node_off = bytes.new(12288)    // 512 x 3 f32 (default 0)
-var g_node_rot = bytes.new(16384)    // 512 x quat f32x4 pose override (default identity)
+var g_skel = bytes.zeros(16)          // [n_nodes][nodes_ptr][world_ptr][tmp_ptr]
+var g_node_scale = bytes.zeros(12288)  // 512 x 3 f32 (default 1)
+var g_node_off = bytes.zeros(12288)    // 512 x 3 f32 (default 0)
+var g_node_rot = bytes.zeros(16384)    // 512 x quat f32x4 pose override (default identity)
 
 // view settings: [sun dx,dy,dz][bg r,g,b] f32 x6
-var g_view = bytes.new(24)
+var g_view = bytes.zeros(24)
 
 let MAX_SKINS = 64
 // per skin: [n_joints:i32][joints_ptr:i32][ibm_ptr:i32][palette_ptr:i32]
-var g_skins = bytes.new(1024)
-var g_n_skins = bytes.new(4)
+var g_skins = bytes.zeros(1024)
+var g_n_skins = bytes.zeros(4)
 // per prim: [sid:i32][jw_ptr:i32]  (jw: per vertex u16x4 joints + f32x4 weights = 24B)
-var g_prim_skin = bytes.new(4096)
+var g_prim_skin = bytes.zeros(4096)
 
 // glTF original node index → topo slot (-1 = none); filled by the Almide loader
-var g_slotmap = bytes.new(4096)
+var g_slotmap = bytes.zeros(4096)
 // mesh index → skin sid (-1 = unskinned); filled by the Almide loader
-var g_meshskin = bytes.new(256)
+var g_meshskin = bytes.zeros(256)
 
 // ── Spring bones (VRMC_springBone, Verlet — faithful to three-vrm) ──
 // per sim joint 96B in pool:
@@ -90,11 +90,11 @@ let SPRING_BLOB = 96
 // per collider 32B: [node_slot:i32][offset:3xf32][radius:f32][pad x3]
 let COLLIDER_BLOB = 32
 // [n_joints][joints_ptr][n_colliders][colliders_ptr][last_time:f32]
-var g_spring = bytes.new(20)
+var g_spring = bytes.zeros(20)
 // live physics tuning: [gravity_add:f32][stiffness_mul:f32]
-var g_spring_tune = bytes.new(8)
+var g_spring_tune = bytes.zeros(8)
 // extra per-node quat layer applied after pose: q_base x q_pose x q_spring
-var g_spring_rot = bytes.new(16384)
+var g_spring_rot = bytes.zeros(16384)
 
 // column-major mat4 multiply on g_pool offsets: D = A * B (D must not alias)
 fn m4_mul(d: Int, a: Int, b: Int) -> Unit = {
@@ -102,11 +102,11 @@ fn m4_mul(d: Int, a: Int, b: Int) -> Unit = {
   while c < 4 {
     var r = 0
     while r < 4 {
-      let v = bytes.read_f32_le(g_pool, a + r * 4) * bytes.read_f32_le(g_pool, b + c * 16)
-        + bytes.read_f32_le(g_pool, a + 16 + r * 4) * bytes.read_f32_le(g_pool, b + c * 16 + 4)
-        + bytes.read_f32_le(g_pool, a + 32 + r * 4) * bytes.read_f32_le(g_pool, b + c * 16 + 8)
-        + bytes.read_f32_le(g_pool, a + 48 + r * 4) * bytes.read_f32_le(g_pool, b + c * 16 + 12)
-      bytes.set_f32_le(g_pool, d + c * 16 + r * 4, v)
+      let v = bytes.get_f32_le(g_pool, a + r * 4) ?? 0.0 * bytes.get_f32_le(g_pool, b + c * 16) ?? 0.0
+        + bytes.get_f32_le(g_pool, a + 16 + r * 4) ?? 0.0 * bytes.get_f32_le(g_pool, b + c * 16 + 4) ?? 0.0
+        + bytes.get_f32_le(g_pool, a + 32 + r * 4) ?? 0.0 * bytes.get_f32_le(g_pool, b + c * 16 + 8) ?? 0.0
+        + bytes.get_f32_le(g_pool, a + 48 + r * 4) ?? 0.0 * bytes.get_f32_le(g_pool, b + c * 16 + 12) ?? 0.0
+      bytes.put_f32_le(g_pool, d + c * 16 + r * 4, v)
       r = r + 1
     }
     c = c + 1
@@ -116,58 +116,58 @@ fn m4_mul(d: Int, a: Int, b: Int) -> Unit = {
 // compose node-local matrix (T+off) * R(quat) * (S*scale) into pool offset d
 fn compose_local(d: Int, slot: Int) -> Unit = {
   let base = bytes.data_ptr(g_pool)
-  let nb = bytes.read_i32_le(g_skel, 4) - base + slot * NODE_BLOB
-  let tx = bytes.read_f32_le(g_pool, nb + 4) + bytes.read_f32_le(g_node_off, slot * 12)
-  let ty = bytes.read_f32_le(g_pool, nb + 8) + bytes.read_f32_le(g_node_off, slot * 12 + 4)
-  let tz = bytes.read_f32_le(g_pool, nb + 12) + bytes.read_f32_le(g_node_off, slot * 12 + 8)
-  let bx = bytes.read_f32_le(g_pool, nb + 16)
-  let by = bytes.read_f32_le(g_pool, nb + 20)
-  let bz = bytes.read_f32_le(g_pool, nb + 24)
-  let bw = bytes.read_f32_le(g_pool, nb + 28)
+  let nb = bytes.get_i32_le(g_skel, 4) ?? 0 - base + slot * NODE_BLOB
+  let tx = bytes.get_f32_le(g_pool, nb + 4) ?? 0.0 + bytes.get_f32_le(g_node_off, slot * 12) ?? 0.0
+  let ty = bytes.get_f32_le(g_pool, nb + 8) ?? 0.0 + bytes.get_f32_le(g_node_off, slot * 12 + 4) ?? 0.0
+  let tz = bytes.get_f32_le(g_pool, nb + 12) ?? 0.0 + bytes.get_f32_le(g_node_off, slot * 12 + 8) ?? 0.0
+  let bx = bytes.get_f32_le(g_pool, nb + 16) ?? 0.0
+  let by = bytes.get_f32_le(g_pool, nb + 20) ?? 0.0
+  let bz = bytes.get_f32_le(g_pool, nb + 24) ?? 0.0
+  let bw = bytes.get_f32_le(g_pool, nb + 28) ?? 0.0
   // pose override composes in local space: q = q_base x q_pose
-  let px = bytes.read_f32_le(g_node_rot, slot * 16)
-  let py = bytes.read_f32_le(g_node_rot, slot * 16 + 4)
-  let pz = bytes.read_f32_le(g_node_rot, slot * 16 + 8)
-  let pw = bytes.read_f32_le(g_node_rot, slot * 16 + 12)
+  let px = bytes.get_f32_le(g_node_rot, slot * 16) ?? 0.0
+  let py = bytes.get_f32_le(g_node_rot, slot * 16 + 4) ?? 0.0
+  let pz = bytes.get_f32_le(g_node_rot, slot * 16 + 8) ?? 0.0
+  let pw = bytes.get_f32_le(g_node_rot, slot * 16 + 12) ?? 0.0
   let mw = bw * pw - bx * px - by * py - bz * pz
   let mx = bw * px + bx * pw + by * pz - bz * py
   let my = bw * py - bx * pz + by * pw + bz * px
   let mz = bw * pz + bx * py - by * px + bz * pw
   // spring layer: q = (q_base x q_pose) x q_spring
-  let sx2 = bytes.read_f32_le(g_spring_rot, slot * 16)
-  let sy2 = bytes.read_f32_le(g_spring_rot, slot * 16 + 4)
-  let sz2 = bytes.read_f32_le(g_spring_rot, slot * 16 + 8)
-  let sw2 = bytes.read_f32_le(g_spring_rot, slot * 16 + 12)
+  let sx2 = bytes.get_f32_le(g_spring_rot, slot * 16) ?? 0.0
+  let sy2 = bytes.get_f32_le(g_spring_rot, slot * 16 + 4) ?? 0.0
+  let sz2 = bytes.get_f32_le(g_spring_rot, slot * 16 + 8) ?? 0.0
+  let sw2 = bytes.get_f32_le(g_spring_rot, slot * 16 + 12) ?? 0.0
   let qw = mw * sw2 - mx * sx2 - my * sy2 - mz * sz2
   let qx = mw * sx2 + mx * sw2 + my * sz2 - mz * sy2
   let qy = mw * sy2 - mx * sz2 + my * sw2 + mz * sx2
   let qz = mw * sz2 + mx * sy2 - my * sx2 + mz * sw2
-  let sx = bytes.read_f32_le(g_pool, nb + 32) * bytes.read_f32_le(g_node_scale, slot * 12)
-  let sy = bytes.read_f32_le(g_pool, nb + 36) * bytes.read_f32_le(g_node_scale, slot * 12 + 4)
-  let sz = bytes.read_f32_le(g_pool, nb + 40) * bytes.read_f32_le(g_node_scale, slot * 12 + 8)
+  let sx = bytes.get_f32_le(g_pool, nb + 32) ?? 0.0 * bytes.get_f32_le(g_node_scale, slot * 12) ?? 0.0
+  let sy = bytes.get_f32_le(g_pool, nb + 36) ?? 0.0 * bytes.get_f32_le(g_node_scale, slot * 12 + 4) ?? 0.0
+  let sz = bytes.get_f32_le(g_pool, nb + 40) ?? 0.0 * bytes.get_f32_le(g_node_scale, slot * 12 + 8) ?? 0.0
   // rotation matrix from quat, columns scaled
-  bytes.set_f32_le(g_pool, d, (1.0 - 2.0 * (qy * qy + qz * qz)) * sx)
-  bytes.set_f32_le(g_pool, d + 4, (2.0 * (qx * qy + qz * qw)) * sx)
-  bytes.set_f32_le(g_pool, d + 8, (2.0 * (qx * qz - qy * qw)) * sx)
-  bytes.set_f32_le(g_pool, d + 12, 0.0)
-  bytes.set_f32_le(g_pool, d + 16, (2.0 * (qx * qy - qz * qw)) * sy)
-  bytes.set_f32_le(g_pool, d + 20, (1.0 - 2.0 * (qx * qx + qz * qz)) * sy)
-  bytes.set_f32_le(g_pool, d + 24, (2.0 * (qy * qz + qx * qw)) * sy)
-  bytes.set_f32_le(g_pool, d + 28, 0.0)
-  bytes.set_f32_le(g_pool, d + 32, (2.0 * (qx * qz + qy * qw)) * sz)
-  bytes.set_f32_le(g_pool, d + 36, (2.0 * (qy * qz - qx * qw)) * sz)
-  bytes.set_f32_le(g_pool, d + 40, (1.0 - 2.0 * (qx * qx + qy * qy)) * sz)
-  bytes.set_f32_le(g_pool, d + 44, 0.0)
-  bytes.set_f32_le(g_pool, d + 48, tx)
-  bytes.set_f32_le(g_pool, d + 52, ty)
-  bytes.set_f32_le(g_pool, d + 56, tz)
-  bytes.set_f32_le(g_pool, d + 60, 1.0)
+  bytes.put_f32_le(g_pool, d, (1.0 - 2.0 * (qy * qy + qz * qz)) * sx)
+  bytes.put_f32_le(g_pool, d + 4, (2.0 * (qx * qy + qz * qw)) * sx)
+  bytes.put_f32_le(g_pool, d + 8, (2.0 * (qx * qz - qy * qw)) * sx)
+  bytes.put_f32_le(g_pool, d + 12, 0.0)
+  bytes.put_f32_le(g_pool, d + 16, (2.0 * (qx * qy - qz * qw)) * sy)
+  bytes.put_f32_le(g_pool, d + 20, (1.0 - 2.0 * (qx * qx + qz * qz)) * sy)
+  bytes.put_f32_le(g_pool, d + 24, (2.0 * (qy * qz + qx * qw)) * sy)
+  bytes.put_f32_le(g_pool, d + 28, 0.0)
+  bytes.put_f32_le(g_pool, d + 32, (2.0 * (qx * qz + qy * qw)) * sz)
+  bytes.put_f32_le(g_pool, d + 36, (2.0 * (qy * qz - qx * qw)) * sz)
+  bytes.put_f32_le(g_pool, d + 40, (1.0 - 2.0 * (qx * qx + qy * qy)) * sz)
+  bytes.put_f32_le(g_pool, d + 44, 0.0)
+  bytes.put_f32_le(g_pool, d + 48, tx)
+  bytes.put_f32_le(g_pool, d + 52, ty)
+  bytes.put_f32_le(g_pool, d + 56, tz)
+  bytes.put_f32_le(g_pool, d + 60, 1.0)
 }
 let MAX_IMAGES = 256
-var g_img_tex = bytes.new(1024)
-var g_cam = bytes.new(12)   // yaw:f32, pitch:f32, dist:f32
-var g_ptr = bytes.new(12)   // last_x:f32, last_y:f32, dragging:i32
-var g_aspect = bytes.new(4) // viewport aspect (width/height), set by host
+var g_img_tex = bytes.zeros(1024)
+var g_cam = bytes.zeros(12)   // yaw:f32, pitch:f32, dist:f32
+var g_ptr = bytes.zeros(12)   // last_x:f32, last_y:f32, dragging:i32
+var g_aspect = bytes.zeros(4) // viewport aspect (width/height), set by host
 
 // ── webgl state slots ──
 let S_PROG_TOON = 0
@@ -311,69 +311,69 @@ let outline_fs = """
 
 // Number of elements in parent[key] (list.len on get_array is safe).
 fn arr_len(parent: json.Value, key: String) -> Int =
-  list.len(option.unwrap_or(json.get_array(parent, key), []))
+  list.len(option.unwrap_or(value.get_array(parent, key), []))
 
 // parent[key][i] via path traversal (avoids the broken get_array list).
 fn arr_at(parent: json.Value, key: String, i: Int) -> json.Value =
-  option.unwrap_or(json.get_path(parent, json.index(json.field(json.root(), key), i)), json.null())
+  option.unwrap_or(value.get_path(parent, value.index(value.key(value.root(), key), i)), value.null())
 
 // ── Accessor resolution (returns base_offset, count, comp_size, stride) ──
 fn acc_base(gltf: json.Value, idx: Int) -> Int = {
   if idx < 0 then 0
   else {
     let acc = arr_at(gltf, "accessors", idx)
-    let bv_idx = option.unwrap_or(json.get_int(acc, "bufferView"), 0)
-    let acc_off = option.unwrap_or(json.get_int(acc, "byteOffset"), 0)
+    let bv_idx = option.unwrap_or(value.get_int(acc, "bufferView"), 0)
+    let acc_off = option.unwrap_or(value.get_int(acc, "byteOffset"), 0)
     let bv = arr_at(gltf, "bufferViews", bv_idx)
-    option.unwrap_or(json.get_int(bv, "byteOffset"), 0) + acc_off
+    option.unwrap_or(value.get_int(bv, "byteOffset"), 0) + acc_off
   }
 }
 fn acc_count(gltf: json.Value, idx: Int) -> Int =
-  if idx < 0 then 0 else option.unwrap_or(json.get_int(arr_at(gltf, "accessors", idx), "count"), 0)
+  if idx < 0 then 0 else option.unwrap_or(value.get_int(arr_at(gltf, "accessors", idx), "count"), 0)
 fn acc_comp_size(gltf: json.Value, idx: Int) -> Int = {
-  let ct = option.unwrap_or(json.get_int(arr_at(gltf, "accessors", idx), "componentType"), 5126)
+  let ct = option.unwrap_or(value.get_int(arr_at(gltf, "accessors", idx), "componentType"), 5126)
   if ct == 5120 or ct == 5121 then 1 else if ct == 5122 or ct == 5123 then 2 else 4
 }
 // numeric element readers for parsed json arrays (ints and floats both appear)
 fn lf(xs: List[json.Value], k: Int, d: Float) -> Float =
   match list.get(xs, k) {
     none => d,
-    some(v) => match json.as_float(v) {
+    some(v) => match value.as_float(v)? {
       some(f) => f,
-      none => match json.as_int(v) { some(i) => int.to_float(i), none => d },
+      none => match value.as_int(v)? { some(i) => float.from(i), none => d },
     },
   }
 fn li(xs: List[json.Value], k: Int, d: Int) -> Int =
-  match list.get(xs, k) { none => d, some(v) => option.unwrap_or(json.as_int(v), d) }
+  match list.get(xs, k) { none => d, some(v) => option.unwrap_or(value.as_int(v)?, d) }
 fn ji_at(parent: json.Value, key: String, k: Int, d: Int) -> Int =
-  li(option.unwrap_or(json.get_array(parent, key), []), k, d)
+  li(option.unwrap_or(value.get_array(parent, key), []), k, d)
 // object field as float, accepting ints ("stiffness": 1)
 fn jnumf(v: json.Value, key: String, d: Float) -> Float =
-  match json.get_float(v, key) {
+  match value.get_float(v, key) {
     some(f) => f,
-    none => match json.get_int(v, key) { some(i) => int.to_float(i), none => d },
+    none => match value.get_int(v, key) { some(i) => float.from(i), none => d },
   }
 
 fn acc_stride(gltf: json.Value, idx: Int, components: Int) -> Int = {
   let acc = arr_at(gltf, "accessors", idx)
-  let bv = arr_at(gltf, "bufferViews", option.unwrap_or(json.get_int(acc, "bufferView"), 0))
-  let bvs = option.unwrap_or(json.get_int(bv, "byteStride"), 0)
+  let bv = arr_at(gltf, "bufferViews", option.unwrap_or(value.get_int(acc, "bufferView"), 0))
+  let bvs = option.unwrap_or(value.get_int(bv, "byteStride"), 0)
   if bvs > 0 then bvs else components * acc_comp_size(gltf, idx)
 }
 
 // ── Shade color (VRM 0.x MToon _ShadeColor; default cool shadow) ──
 fn shade_c(gltf: json.Value, mat_idx: Int, idx: Int) -> Float = {
-  match json.get(gltf, "extensions") {
+  match value.get(gltf, "extensions") {
     none => 0.55,
-    some(ext) => match json.get(ext, "VRM") {
+    some(ext) => match value.get(ext, "VRM") {
       none => 0.55,
       some(vrm) => {
         let prop = arr_at(vrm, "materialProperties", mat_idx)
-        match json.get(prop, "vectorProperties") {
+        match value.get(prop, "vectorProperties") {
           none => 0.55,
           some(vp) => {
             let arr = arr_at(vp, "_ShadeColor", idx)
-            option.unwrap_or(json.as_float(arr), 0.55)
+            option.unwrap_or(value.as_float(arr)?, 0.55)
           },
         }
       },
@@ -421,16 +421,16 @@ effect fn main() -> Unit = {
   webgl.set_state(S_O_TEX, webgl.get_uniform_location(outline, "u_tex"))
   webgl.set_state(S_O_HASTEX, webgl.get_uniform_location(outline, "u_has_tex"))
 
-  bytes.set_f32_le(g_aspect, 0, 1.333)
+  bytes.put_f32_le(g_aspect, 0, 1.333)
 
   webgl.enable(webgl.depth_test())
   webgl.depth_func(webgl.lequal())
   webgl.enable(webgl.cull_face_cap())
   webgl.clear_color(0.10, 0.11, 0.14, 1.0)
 
-  bytes.set_f32_le(g_cam, 0, 0.0)
-  bytes.set_f32_le(g_cam, 4, 0.05)
-  bytes.set_f32_le(g_cam, 8, 3.0)
+  bytes.put_f32_le(g_cam, 0, 0.0)
+  bytes.put_f32_le(g_cam, 4, 0.05)
+  bytes.put_f32_le(g_cam, 8, 3.0)
   let _ = set_light_dir(0.35, 0.7, 0.5)
   let _ = set_bg(0.08, 0.085, 0.11)
   let _ = set_spring_tune(0.0, 1.0)
@@ -440,7 +440,7 @@ effect fn main() -> Unit = {
   on_pointer_up(0.0, 0.0, 0)
   on_pointer_move(0.0, 0.0)
   on_wheel(0.0)
-  let _ = load_vrm_data(bytes.new(0))
+  let _ = load_vrm_data(bytes.zeros(0))
   let _ = get_prim_count()
   let _ = reset_prims()
   let _ = add_prim(0, 0, 0, 0, 0, 0, 0.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0)
@@ -467,25 +467,25 @@ effect fn main() -> Unit = {
 }
 
 pub fn set_aspect(a: Float) -> Int = {
-  bytes.set_f32_le(g_aspect, 0, a)
+  bytes.put_f32_le(g_aspect, 0, a)
   0
 }
 
 // ── Build one primitive's interleaved vertex buffer (44B) from glTF ──
 fn build_verts(gltf: json.Value, data: Bytes, bin_off: Int, prim: json.Value) -> Bytes = {
-  let attrs = option.unwrap_or(json.get(prim, "attributes"), json.null())
-  let pos_i = option.unwrap_or(json.get_int(attrs, "POSITION"), -1)
+  let attrs = option.unwrap_or(value.get(prim, "attributes"), value.null())
+  let pos_i = option.unwrap_or(value.get_int(attrs, "POSITION"), -1)
   let vc = acc_count(gltf, pos_i)
-  let verts = bytes.new(vc * STRIDE)
+  let verts = bytes.zeros(vc * STRIDE)
   if pos_i < 0 then verts
   else {
     let pos_base = acc_base(gltf, pos_i)
     let pos_str = acc_stride(gltf, pos_i, 3)
-    let norm_i = option.unwrap_or(json.get_int(attrs, "NORMAL"), -1)
+    let norm_i = option.unwrap_or(value.get_int(attrs, "NORMAL"), -1)
     let has_n = norm_i >= 0
     let norm_base = if has_n then acc_base(gltf, norm_i) else 0
     let norm_str = if has_n then acc_stride(gltf, norm_i, 3) else 12
-    let uv_i = option.unwrap_or(json.get_int(attrs, "TEXCOORD_0"), -1)
+    let uv_i = option.unwrap_or(value.get_int(attrs, "TEXCOORD_0"), -1)
     let has_uv = uv_i >= 0
     let uv_base = if has_uv then acc_base(gltf, uv_i) else 0
     let uv_str = if has_uv then acc_stride(gltf, uv_i, 2) else 8
@@ -495,17 +495,17 @@ fn build_verts(gltf: json.Value, data: Bytes, bin_off: Int, prim: json.Value) ->
       bytes.copy_from(verts, data, dst, bin_off + pos_base + i * pos_str, 12)
       if has_n then bytes.copy_from(verts, data, dst + 12, bin_off + norm_base + i * norm_str, 12)
       else {
-        bytes.set_f32_le(verts, dst + 12, 0.0)
-        bytes.set_f32_le(verts, dst + 16, 1.0)
-        bytes.set_f32_le(verts, dst + 20, 0.0)
+        bytes.put_f32_le(verts, dst + 12, 0.0)
+        bytes.put_f32_le(verts, dst + 16, 1.0)
+        bytes.put_f32_le(verts, dst + 20, 0.0)
       }
-      bytes.set_f32_le(verts, dst + 24, 1.0)
-      bytes.set_f32_le(verts, dst + 28, 1.0)
-      bytes.set_f32_le(verts, dst + 32, 1.0)
+      bytes.put_f32_le(verts, dst + 24, 1.0)
+      bytes.put_f32_le(verts, dst + 28, 1.0)
+      bytes.put_f32_le(verts, dst + 32, 1.0)
       if has_uv then bytes.copy_from(verts, data, dst + 36, bin_off + uv_base + i * uv_str, 8)
       else {
-        bytes.set_f32_le(verts, dst + 36, 0.0)
-        bytes.set_f32_le(verts, dst + 40, 0.0)
+        bytes.put_f32_le(verts, dst + 36, 0.0)
+        bytes.put_f32_le(verts, dst + 40, 0.0)
       }
       i = i + 1
     }
@@ -515,9 +515,9 @@ fn build_verts(gltf: json.Value, data: Bytes, bin_off: Int, prim: json.Value) ->
 
 // ── Build one primitive's u16 index buffer from glTF (u16 or u32 source) ──
 fn build_idx(gltf: json.Value, data: Bytes, bin_off: Int, prim: json.Value) -> Bytes = {
-  let idx_i = option.unwrap_or(json.get_int(prim, "indices"), -1)
+  let idx_i = option.unwrap_or(value.get_int(prim, "indices"), -1)
   let ic = acc_count(gltf, idx_i)
-  let idx = bytes.new(ic * 2)
+  let idx = bytes.zeros(ic * 2)
   if idx_i < 0 then idx
   else {
     let base = acc_base(gltf, idx_i)
@@ -526,7 +526,7 @@ fn build_idx(gltf: json.Value, data: Bytes, bin_off: Int, prim: json.Value) -> B
     else {
       var j = 0
       while j < ic {
-        bytes.set_u16_le(idx, j * 2, bytes.read_u32_le(data, bin_off + base + j * 4))
+        bytes.put_u16_le(idx, j * 2, bytes.get_u32_le(data, bin_off + base + j * 4) ?? 0)
         j = j + 1
       }
     }
@@ -537,15 +537,15 @@ fn build_idx(gltf: json.Value, data: Bytes, bin_off: Int, prim: json.Value) -> B
 // ── Load VRM ──
 pub fn load_vrm_data(data: Bytes) -> Int = {
   if bytes.len(data) < 12 then 0
-  else if bytes.read_u32_le(data, 0) != 0x46546C67 then 0
+  else if (bytes.get_u32_le(data, 0) ?? 0) != 0x46546C67 then 0
   else {
-    let total = bytes.read_u32_le(data, 8)
+    let total = bytes.get_u32_le(data, 8) ?? 0
     var offset = 12
-    var gltf = json.null()
+    var gltf = value.null()
     var bin_off = 0
     while offset + 8 <= int.min(total, bytes.len(data)) {
-      let cl = bytes.read_u32_le(data, offset)
-      let ct = bytes.read_u32_le(data, offset + 4)
+      let cl = bytes.get_u32_le(data, offset) ?? 0
+      let ct = bytes.get_u32_le(data, offset + 4) ?? 0
       offset = offset + 8
       let end = int.min(offset + cl, bytes.len(data))
       if ct == 0x4E4F534A then {
@@ -556,24 +556,24 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
       offset = end
     }
 
-    let is_vrm0 = match json.get(gltf, "extensions") {
-      some(ext) => option.is_some(json.get(ext, "VRM")), none => false,
+    let is_vrm0 = match value.get(gltf, "extensions") {
+      some(ext) => option.is_some(value.get(ext, "VRM")), none => false,
     }
 
     // Images → GL textures (handle cached by image index).
     let n_imgs = int.min(arr_len(gltf, "images"), MAX_IMAGES)
     var ii = 0
     while ii < n_imgs {
-      bytes.set_i32_le(g_img_tex, ii * 4, -1)
+      bytes.put_i32_le(g_img_tex, ii * 4, -1)
       let img = arr_at(gltf, "images", ii)
-      let bv_idx = option.unwrap_or(json.get_int(img, "bufferView"), -1)
+      let bv_idx = option.unwrap_or(value.get_int(img, "bufferView"), -1)
       if bv_idx >= 0 then {
         let bv = arr_at(gltf, "bufferViews", bv_idx)
-        let bo = option.unwrap_or(json.get_int(bv, "byteOffset"), 0)
-        let bl = option.unwrap_or(json.get_int(bv, "byteLength"), 0)
+        let bo = option.unwrap_or(value.get_int(bv, "byteOffset"), 0)
+        let bl = option.unwrap_or(value.get_int(bv, "byteLength"), 0)
         let tex = webgl.create_texture()
         webgl.tex_image_2d_encoded(tex, bytes.data_ptr(data) + bin_off + bo, bl)
-        bytes.set_i32_le(g_img_tex, ii * 4, tex)
+        bytes.put_i32_le(g_img_tex, ii * 4, tex)
       } else {}
       ii = ii + 1
     }
@@ -582,22 +582,22 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
     let base2 = bytes.data_ptr(g_pool)
     let n_nodes = arr_len(gltf, "nodes")
     var sm0 = 0
-    while sm0 < MAX_NODES { bytes.set_i32_le(g_slotmap, sm0 * 4, 0 - 1); sm0 = sm0 + 1 }
+    while sm0 < MAX_NODES { bytes.put_i32_le(g_slotmap, sm0 * 4, 0 - 1); sm0 = sm0 + 1 }
     var ms0 = 0
-    while ms0 < 64 { bytes.set_i32_le(g_meshskin, ms0 * 4, 0 - 1); ms0 = ms0 + 1 }
+    while ms0 < 64 { bytes.put_i32_le(g_meshskin, ms0 * 4, 0 - 1); ms0 = ms0 + 1 }
     if n_nodes > 0 and n_nodes <= MAX_NODES then {
       let par = pool_alloc(n_nodes * 4)
       let queue = pool_alloc(n_nodes * 4)
       var i2 = 0
-      while i2 < n_nodes { bytes.set_i32_le(g_pool, par - base2 + i2 * 4, 0 - 1); i2 = i2 + 1 }
+      while i2 < n_nodes { bytes.put_i32_le(g_pool, par - base2 + i2 * 4, 0 - 1); i2 = i2 + 1 }
       var i3 = 0
       while i3 < n_nodes {
         let nd = arr_at(gltf, "nodes", i3)
-        let nch = list.len(option.unwrap_or(json.get_array(nd, "children"), []))
+        let nch = list.len(option.unwrap_or(value.get_array(nd, "children"), []))
         var k2 = 0
         while k2 < nch {
           let ch = ji_at(nd, "children", k2, 0 - 1)
-          if ch >= 0 and ch < n_nodes then { bytes.set_i32_le(g_pool, par - base2 + ch * 4, i3) } else {}
+          if ch >= 0 and ch < n_nodes then { bytes.put_i32_le(g_pool, par - base2 + ch * 4, i3) } else {}
           k2 = k2 + 1
         }
         i3 = i3 + 1
@@ -606,22 +606,22 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
       var qt = 0
       var r2 = 0
       while r2 < n_nodes {
-        if bytes.read_i32_le(g_pool, par - base2 + r2 * 4) < 0 then {
-          bytes.set_i32_le(g_pool, queue - base2 + qt * 4, r2)
+        if bytes.get_i32_le(g_pool, par - base2 + r2 * 4) ?? 0 < 0 then {
+          bytes.put_i32_le(g_pool, queue - base2 + qt * 4, r2)
           qt = qt + 1
         } else {}
         r2 = r2 + 1
       }
       while qh < qt {
-        let cur = bytes.read_i32_le(g_pool, queue - base2 + qh * 4)
-        bytes.set_i32_le(g_slotmap, cur * 4, qh)
+        let cur = bytes.get_i32_le(g_pool, queue - base2 + qh * 4) ?? 0
+        bytes.put_i32_le(g_slotmap, cur * 4, qh)
         let nd2 = arr_at(gltf, "nodes", cur)
-        let nch2 = list.len(option.unwrap_or(json.get_array(nd2, "children"), []))
+        let nch2 = list.len(option.unwrap_or(value.get_array(nd2, "children"), []))
         var k3 = 0
         while k3 < nch2 {
           let ch2 = ji_at(nd2, "children", k3, 0 - 1)
           if ch2 >= 0 and ch2 < n_nodes and qt < n_nodes then {
-            bytes.set_i32_le(g_pool, queue - base2 + qt * 4, ch2)
+            bytes.put_i32_le(g_pool, queue - base2 + qt * 4, ch2)
             qt = qt + 1
           } else {}
           k3 = k3 + 1
@@ -631,24 +631,24 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
       let nblob = pool_alloc(n_nodes * NODE_BLOB)
       var s2 = 0
       while s2 < n_nodes {
-        let orig = bytes.read_i32_le(g_pool, queue - base2 + s2 * 4)
+        let orig = bytes.get_i32_le(g_pool, queue - base2 + s2 * 4) ?? 0
         let nd3 = arr_at(gltf, "nodes", orig)
         let o2 = nblob - base2 + s2 * NODE_BLOB
-        let p2 = bytes.read_i32_le(g_pool, par - base2 + orig * 4)
-        bytes.set_i32_le(g_pool, o2, if p2 < 0 then 0 - 1 else bytes.read_i32_le(g_slotmap, p2 * 4))
-        let tr = option.unwrap_or(json.get_array(nd3, "translation"), [])
-        let ro = option.unwrap_or(json.get_array(nd3, "rotation"), [])
-        let sc = option.unwrap_or(json.get_array(nd3, "scale"), [])
-        bytes.set_f32_le(g_pool, o2 + 4, lf(tr, 0, 0.0))
-        bytes.set_f32_le(g_pool, o2 + 8, lf(tr, 1, 0.0))
-        bytes.set_f32_le(g_pool, o2 + 12, lf(tr, 2, 0.0))
-        bytes.set_f32_le(g_pool, o2 + 16, lf(ro, 0, 0.0))
-        bytes.set_f32_le(g_pool, o2 + 20, lf(ro, 1, 0.0))
-        bytes.set_f32_le(g_pool, o2 + 24, lf(ro, 2, 0.0))
-        bytes.set_f32_le(g_pool, o2 + 28, lf(ro, 3, 1.0))
-        bytes.set_f32_le(g_pool, o2 + 32, lf(sc, 0, 1.0))
-        bytes.set_f32_le(g_pool, o2 + 36, lf(sc, 1, 1.0))
-        bytes.set_f32_le(g_pool, o2 + 40, lf(sc, 2, 1.0))
+        let p2 = bytes.get_i32_le(g_pool, par - base2 + orig * 4) ?? 0
+        bytes.put_i32_le(g_pool, o2, if p2 < 0 then 0 - 1 else bytes.get_i32_le(g_slotmap, p2 * 4) ?? 0)
+        let tr = option.unwrap_or(value.get_array(nd3, "translation"), [])
+        let ro = option.unwrap_or(value.get_array(nd3, "rotation"), [])
+        let sc = option.unwrap_or(value.get_array(nd3, "scale"), [])
+        bytes.put_f32_le(g_pool, o2 + 4, lf(tr, 0, 0.0))
+        bytes.put_f32_le(g_pool, o2 + 8, lf(tr, 1, 0.0))
+        bytes.put_f32_le(g_pool, o2 + 12, lf(tr, 2, 0.0))
+        bytes.put_f32_le(g_pool, o2 + 16, lf(ro, 0, 0.0))
+        bytes.put_f32_le(g_pool, o2 + 20, lf(ro, 1, 0.0))
+        bytes.put_f32_le(g_pool, o2 + 24, lf(ro, 2, 0.0))
+        bytes.put_f32_le(g_pool, o2 + 28, lf(ro, 3, 1.0))
+        bytes.put_f32_le(g_pool, o2 + 32, lf(sc, 0, 1.0))
+        bytes.put_f32_le(g_pool, o2 + 36, lf(sc, 1, 1.0))
+        bytes.put_f32_le(g_pool, o2 + 40, lf(sc, 2, 1.0))
         s2 = s2 + 1
       }
       let _ = set_skeleton(n_nodes, nblob)
@@ -656,16 +656,16 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
       var si = 0
       while si < n_sk {
         let sk = arr_at(gltf, "skins", si)
-        let nj = list.len(option.unwrap_or(json.get_array(sk, "joints"), []))
+        let nj = list.len(option.unwrap_or(value.get_array(sk, "joints"), []))
         let jp = pool_alloc(nj * 4)
         var jk = 0
         while jk < nj {
           let on = ji_at(sk, "joints", jk, 0)
-          let slot = if on >= 0 and on < MAX_NODES then bytes.read_i32_le(g_slotmap, on * 4) else 0
-          bytes.set_i32_le(g_pool, jp - base2 + jk * 4, int.max(slot, 0))
+          let slot = if on >= 0 and on < MAX_NODES then bytes.get_i32_le(g_slotmap, on * 4) ?? 0 else 0
+          bytes.put_i32_le(g_pool, jp - base2 + jk * 4, int.max(slot, 0))
           jk = jk + 1
         }
-        let ibm_i = option.unwrap_or(json.get_int(sk, "inverseBindMatrices"), 0 - 1)
+        let ibm_i = option.unwrap_or(value.get_int(sk, "inverseBindMatrices"), 0 - 1)
         let mp = pool_alloc(nj * 64)
         if ibm_i >= 0 then {
           bytes.copy_from(g_pool, data, mp - base2, bin_off + acc_base(gltf, ibm_i), nj * 64)
@@ -673,10 +673,10 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
           var idn = 0
           while idn < nj {
             let mo = mp - base2 + idn * 64
-            bytes.set_f32_le(g_pool, mo, 1.0)
-            bytes.set_f32_le(g_pool, mo + 20, 1.0)
-            bytes.set_f32_le(g_pool, mo + 40, 1.0)
-            bytes.set_f32_le(g_pool, mo + 60, 1.0)
+            bytes.put_f32_le(g_pool, mo, 1.0)
+            bytes.put_f32_le(g_pool, mo + 20, 1.0)
+            bytes.put_f32_le(g_pool, mo + 40, 1.0)
+            bytes.put_f32_le(g_pool, mo + 60, 1.0)
             idn = idn + 1
           }
         }
@@ -686,35 +686,35 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
       var ni4 = 0
       while ni4 < n_nodes {
         let nd4 = arr_at(gltf, "nodes", ni4)
-        let m4 = option.unwrap_or(json.get_int(nd4, "mesh"), 0 - 1)
-        let s4 = option.unwrap_or(json.get_int(nd4, "skin"), 0 - 1)
-        if m4 >= 0 and m4 < 64 and s4 >= 0 and s4 < n_sk then { bytes.set_i32_le(g_meshskin, m4 * 4, s4) } else {}
+        let m4 = option.unwrap_or(value.get_int(nd4, "mesh"), 0 - 1)
+        let s4 = option.unwrap_or(value.get_int(nd4, "skin"), 0 - 1)
+        if m4 >= 0 and m4 < 64 and s4 >= 0 and s4 < n_sk then { bytes.put_i32_le(g_meshskin, m4 * 4, s4) } else {}
         ni4 = ni4 + 1
       }
 
       // VRMC_springBone → sim joints (consecutive pairs) + sphere colliders
-      match json.get(gltf, "extensions") {
-        some(ext2) => match json.get(ext2, "VRMC_springBone") {
+      match value.get(gltf, "extensions") {
+        some(ext2) => match value.get(ext2, "VRMC_springBone") {
           some(sb) => {
-            let cols = option.unwrap_or(json.get_array(sb, "colliders"), [])
+            let cols = option.unwrap_or(value.get_array(sb, "colliders"), [])
             let nc2 = int.min(list.len(cols), 64)
             let cb2 = pool_alloc(int.max(nc2, 1) * COLLIDER_BLOB)
             var c_used = 0
             var c2 = 0
             while c2 < nc2 {
-              let col = list.get_or(cols, c2, json.null())
-              let cn = option.unwrap_or(json.get_int(col, "node"), 0 - 1)
-              match json.get(col, "shape") {
-                some(sh) => match json.get(sh, "sphere") {
+              let col = list.get(cols, c2) ?? value.null()
+              let cn = option.unwrap_or(value.get_int(col, "node"), 0 - 1)
+              match value.get(col, "shape") {
+                some(sh) => match value.get(sh, "sphere") {
                   some(sp) => {
-                    let off2 = option.unwrap_or(json.get_array(sp, "offset"), [])
+                    let off2 = option.unwrap_or(value.get_array(sp, "offset"), [])
                     let co2 = cb2 - base2 + c_used * COLLIDER_BLOB
-                    let cslot = if cn >= 0 and cn < MAX_NODES then bytes.read_i32_le(g_slotmap, cn * 4) else 0 - 1
-                    bytes.set_i32_le(g_pool, co2, cslot)
-                    bytes.set_f32_le(g_pool, co2 + 4, lf(off2, 0, 0.0))
-                    bytes.set_f32_le(g_pool, co2 + 8, lf(off2, 1, 0.0))
-                    bytes.set_f32_le(g_pool, co2 + 12, lf(off2, 2, 0.0))
-                    bytes.set_f32_le(g_pool, co2 + 16, jnumf(sp, "radius", 0.0))
+                    let cslot = if cn >= 0 and cn < MAX_NODES then bytes.get_i32_le(g_slotmap, cn * 4) ?? 0 else 0 - 1
+                    bytes.put_i32_le(g_pool, co2, cslot)
+                    bytes.put_f32_le(g_pool, co2 + 4, lf(off2, 0, 0.0))
+                    bytes.put_f32_le(g_pool, co2 + 8, lf(off2, 1, 0.0))
+                    bytes.put_f32_le(g_pool, co2 + 12, lf(off2, 2, 0.0))
+                    bytes.put_f32_le(g_pool, co2 + 16, jnumf(sp, "radius", 0.0))
                     c_used = c_used + 1
                   },
                   none => {},
@@ -723,44 +723,44 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
               }
               c2 = c2 + 1
             }
-            bytes.set_i32_le(g_spring, 8, c_used)
-            bytes.set_i32_le(g_spring, 12, cb2)
-            let sps = option.unwrap_or(json.get_array(sb, "springs"), [])
+            bytes.put_i32_le(g_spring, 8, c_used)
+            bytes.put_i32_le(g_spring, 12, cb2)
+            let sps = option.unwrap_or(value.get_array(sb, "springs"), [])
             let nsp = list.len(sps)
             let jb2 = pool_alloc(256 * SPRING_BLOB)
             var used = 0
             var s5 = 0
             while s5 < nsp {
-              let sp2 = list.get_or(sps, s5, json.null())
-              let jl = option.unwrap_or(json.get_array(sp2, "joints"), [])
+              let sp2 = list.get(sps, s5) ?? value.null()
+              let jl = option.unwrap_or(value.get_array(sp2, "joints"), [])
               let njl = list.len(jl)
               var k5 = 0
               while k5 + 1 < njl and used < 256 {
-                let j0 = list.get_or(jl, k5, json.null())
-                let j1 = list.get_or(jl, k5 + 1, json.null())
-                let bn = option.unwrap_or(json.get_int(j0, "node"), 0 - 1)
-                let cn3 = option.unwrap_or(json.get_int(j1, "node"), 0 - 1)
+                let j0 = list.get(jl, k5) ?? value.null()
+                let j1 = list.get(jl, k5 + 1) ?? value.null()
+                let bn = option.unwrap_or(value.get_int(j0, "node"), 0 - 1)
+                let cn3 = option.unwrap_or(value.get_int(j1, "node"), 0 - 1)
                 if bn >= 0 and bn < MAX_NODES and cn3 >= 0 and cn3 < MAX_NODES then {
                   let jo2 = jb2 - base2 + used * SPRING_BLOB
-                  bytes.set_i32_le(g_pool, jo2, bytes.read_i32_le(g_slotmap, bn * 4))
-                  bytes.set_i32_le(g_pool, jo2 + 4, bytes.read_i32_le(g_slotmap, cn3 * 4))
-                  bytes.set_f32_le(g_pool, jo2 + 8, jnumf(j0, "stiffness", 1.0))
-                  bytes.set_f32_le(g_pool, jo2 + 12, jnumf(j0, "gravityPower", 0.0))
-                  let gd = option.unwrap_or(json.get_array(j0, "gravityDir"), [])
-                  bytes.set_f32_le(g_pool, jo2 + 16, lf(gd, 0, 0.0))
-                  bytes.set_f32_le(g_pool, jo2 + 20, lf(gd, 1, 0.0 - 1.0))
-                  bytes.set_f32_le(g_pool, jo2 + 24, lf(gd, 2, 0.0))
-                  bytes.set_f32_le(g_pool, jo2 + 28, jnumf(j0, "dragForce", 0.5))
-                  bytes.set_f32_le(g_pool, jo2 + 32, jnumf(j0, "hitRadius", 0.0))
-                  bytes.set_i32_le(g_pool, jo2 + 88, 0)
+                  bytes.put_i32_le(g_pool, jo2, bytes.get_i32_le(g_slotmap, bn * 4) ?? 0)
+                  bytes.put_i32_le(g_pool, jo2 + 4, bytes.get_i32_le(g_slotmap, cn3 * 4) ?? 0)
+                  bytes.put_f32_le(g_pool, jo2 + 8, jnumf(j0, "stiffness", 1.0))
+                  bytes.put_f32_le(g_pool, jo2 + 12, jnumf(j0, "gravityPower", 0.0))
+                  let gd = option.unwrap_or(value.get_array(j0, "gravityDir"), [])
+                  bytes.put_f32_le(g_pool, jo2 + 16, lf(gd, 0, 0.0))
+                  bytes.put_f32_le(g_pool, jo2 + 20, lf(gd, 1, 0.0 - 1.0))
+                  bytes.put_f32_le(g_pool, jo2 + 24, lf(gd, 2, 0.0))
+                  bytes.put_f32_le(g_pool, jo2 + 28, jnumf(j0, "dragForce", 0.5))
+                  bytes.put_f32_le(g_pool, jo2 + 32, jnumf(j0, "hitRadius", 0.0))
+                  bytes.put_i32_le(g_pool, jo2 + 88, 0)
                   used = used + 1
                 } else {}
                 k5 = k5 + 1
               }
               s5 = s5 + 1
             }
-            bytes.set_i32_le(g_spring, 0, used)
-            bytes.set_i32_le(g_spring, 4, jb2)
+            bytes.put_i32_le(g_spring, 0, used)
+            bytes.put_i32_le(g_spring, 4, jb2)
           },
           none => {},
         },
@@ -796,7 +796,7 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
           webgl.bind_buffer(webgl.element_array_buffer(), ibo)
           webgl.buffer_data_u16_ptr(webgl.element_array_buffer(), bytes.data_ptr(idxb), ic * 2, webgl.static_draw())
 
-          let mat_i = option.unwrap_or(json.get_int(prim, "material"), -1)
+          let mat_i = option.unwrap_or(value.get_int(prim, "material"), -1)
           var tex_handle = -1
           var sr = 0.55
           var sg = 0.50
@@ -820,66 +820,66 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
           var em_tex = 0 - 1
           if mat_i >= 0 then {
             let material = arr_at(gltf, "materials", mat_i)
-            match json.get(material, "pbrMetallicRoughness") {
-              some(pbr) => match json.get(pbr, "baseColorTexture") {
+            match value.get(material, "pbrMetallicRoughness") {
+              some(pbr) => match value.get(pbr, "baseColorTexture") {
                 some(bct) => {
-                  let tex_idx = option.unwrap_or(json.get_int(bct, "index"), -1)
+                  let tex_idx = option.unwrap_or(value.get_int(bct, "index"), -1)
                   if tex_idx >= 0 then {
                     let t = arr_at(gltf, "textures", tex_idx)
-                    let src = option.unwrap_or(json.get_int(t, "source"), -1)
-                    if src >= 0 and src < MAX_IMAGES then { tex_handle = bytes.read_i32_le(g_img_tex, src * 4) } else {}
+                    let src = option.unwrap_or(value.get_int(t, "source"), -1)
+                    if src >= 0 and src < MAX_IMAGES then { tex_handle = bytes.get_i32_le(g_img_tex, src * 4) ?? 0 } else {}
                   } else {}
                 },
                 none => {},
               },
               none => {},
             }
-            let am = option.unwrap_or(json.get_string(material, "alphaMode"), "OPAQUE")
+            let am = option.unwrap_or(value.get_string(material, "alphaMode"), "OPAQUE")
             amode = if am == "BLEND" then 2 else if am == "MASK" then 1 else 0
-            let ef = option.unwrap_or(json.get_array(material, "emissiveFactor"), [])
+            let ef = option.unwrap_or(value.get_array(material, "emissiveFactor"), [])
             emr = lf(ef, 0, 0.0)
             emg = lf(ef, 1, 0.0)
             emb = lf(ef, 2, 0.0)
-            match json.get(material, "emissiveTexture") {
+            match value.get(material, "emissiveTexture") {
               some(et) => {
-                let eti = option.unwrap_or(json.get_int(et, "index"), 0 - 1)
+                let eti = option.unwrap_or(value.get_int(et, "index"), 0 - 1)
                 if eti >= 0 then {
                   let etex = arr_at(gltf, "textures", eti)
-                  let esrc = option.unwrap_or(json.get_int(etex, "source"), 0 - 1)
-                  if esrc >= 0 and esrc < MAX_IMAGES then { em_tex = bytes.read_i32_le(g_img_tex, esrc * 4) } else {}
+                  let esrc = option.unwrap_or(value.get_int(etex, "source"), 0 - 1)
+                  if esrc >= 0 and esrc < MAX_IMAGES then { em_tex = bytes.get_i32_le(g_img_tex, esrc * 4) ?? 0 } else {}
                 } else {}
               },
               none => {},
             }
-            match json.get(material, "extensions") {
-              some(ext) => match json.get(ext, "VRMC_materials_mtoon") {
+            match value.get(material, "extensions") {
+              some(ext) => match value.get(ext, "VRMC_materials_mtoon") {
                 some(mt) => {
                   sr = shade_c(gltf, mat_i, 0)
                   sg = shade_c(gltf, mat_i, 1)
                   sb = shade_c(gltf, mat_i, 2)
                   shift = jnumf(mt, "shadingShiftFactor", 0.0)
                   toony = jnumf(mt, "shadingToonyFactor", 0.9)
-                  let rc2 = option.unwrap_or(json.get_array(mt, "parametricRimColorFactor"), [])
+                  let rc2 = option.unwrap_or(value.get_array(mt, "parametricRimColorFactor"), [])
                   rimr = lf(rc2, 0, 0.0)
                   rimg = lf(rc2, 1, 0.0)
                   rimb = lf(rc2, 2, 0.0)
                   rimp = jnumf(mt, "parametricRimFresnelPowerFactor", 5.0)
                   riml = jnumf(mt, "parametricRimLiftFactor", 0.0)
-                  match json.get(mt, "shadeMultiplyTexture") {
+                  match value.get(mt, "shadeMultiplyTexture") {
                     some(st) => {
-                      let sti = option.unwrap_or(json.get_int(st, "index"), 0 - 1)
+                      let sti = option.unwrap_or(value.get_int(st, "index"), 0 - 1)
                       if sti >= 0 then {
                         let stex = arr_at(gltf, "textures", sti)
-                        let ssrc = option.unwrap_or(json.get_int(stex, "source"), 0 - 1)
-                        if ssrc >= 0 and ssrc < MAX_IMAGES then { sh_tex = bytes.read_i32_le(g_img_tex, ssrc * 4) } else {}
+                        let ssrc = option.unwrap_or(value.get_int(stex, "source"), 0 - 1)
+                        if ssrc >= 0 and ssrc < MAX_IMAGES then { sh_tex = bytes.get_i32_le(g_img_tex, ssrc * 4) ?? 0 } else {}
                       } else {}
                     },
                     none => {},
                   }
-                  let om = option.unwrap_or(json.get_string(mt, "outlineWidthMode"), "none")
+                  let om = option.unwrap_or(value.get_string(mt, "outlineWidthMode"), "none")
                   if om != "none" then {
-                    ow = option.unwrap_or(json.get_float(mt, "outlineWidthFactor"), 0.0)
-                    let oc = option.unwrap_or(json.get_array(mt, "outlineColorFactor"), [])
+                    ow = option.unwrap_or(value.get_float(mt, "outlineWidthFactor"), 0.0)
+                    let oc = option.unwrap_or(value.get_array(mt, "outlineColorFactor"), [])
                     ocr = lf(oc, 0, 0.0)
                     ocg = lf(oc, 1, 0.0)
                     ocb = lf(oc, 2, 0.0)
@@ -898,44 +898,44 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
           } else {}
 
           let po = pid * PRIM_STRIDE
-          bytes.set_i32_le(g_prim_meta, po, vbo)
-          bytes.set_i32_le(g_prim_meta, po + 4, ibo)
-          bytes.set_i32_le(g_prim_meta, po + 8, ic)
-          bytes.set_i32_le(g_prim_meta, po + 12, tex_handle)
-          bytes.set_f32_le(g_prim_meta, po + 16, sr)
-          bytes.set_f32_le(g_prim_meta, po + 20, sg)
-          bytes.set_f32_le(g_prim_meta, po + 24, sb)
-          bytes.set_i32_le(g_prim_meta, po + 28, amode)
-          bytes.set_f32_le(g_prim_meta, po + 32, ow)
-          bytes.set_f32_le(g_prim_meta, po + 36, ocr)
-          bytes.set_f32_le(g_prim_meta, po + 40, ocg)
-          bytes.set_f32_le(g_prim_meta, po + 44, ocb)
-          bytes.set_i32_le(g_prim_meta, po + 48, vp)
-          bytes.set_i32_le(g_prim_meta, po + 52, vc)
-          bytes.set_i32_le(g_prim_meta, po + 56, 0)
-          bytes.set_i32_le(g_prim_meta, po + 60, 0)
-          bytes.set_i32_le(g_prim_skin, pid * 8, 0 - 1)
-          bytes.set_i32_le(g_prim_skin, pid * 8 + 4, 0)
+          bytes.put_i32_le(g_prim_meta, po, vbo)
+          bytes.put_i32_le(g_prim_meta, po + 4, ibo)
+          bytes.put_i32_le(g_prim_meta, po + 8, ic)
+          bytes.put_i32_le(g_prim_meta, po + 12, tex_handle)
+          bytes.put_f32_le(g_prim_meta, po + 16, sr)
+          bytes.put_f32_le(g_prim_meta, po + 20, sg)
+          bytes.put_f32_le(g_prim_meta, po + 24, sb)
+          bytes.put_i32_le(g_prim_meta, po + 28, amode)
+          bytes.put_f32_le(g_prim_meta, po + 32, ow)
+          bytes.put_f32_le(g_prim_meta, po + 36, ocr)
+          bytes.put_f32_le(g_prim_meta, po + 40, ocg)
+          bytes.put_f32_le(g_prim_meta, po + 44, ocb)
+          bytes.put_i32_le(g_prim_meta, po + 48, vp)
+          bytes.put_i32_le(g_prim_meta, po + 52, vc)
+          bytes.put_i32_le(g_prim_meta, po + 56, 0)
+          bytes.put_i32_le(g_prim_meta, po + 60, 0)
+          bytes.put_i32_le(g_prim_skin, pid * 8, 0 - 1)
+          bytes.put_i32_le(g_prim_skin, pid * 8 + 4, 0)
           let mto = pid * MTOON_BLOB
-          bytes.set_f32_le(g_prim_mtoon, mto, shift)
-          bytes.set_f32_le(g_prim_mtoon, mto + 4, toony)
-          bytes.set_f32_le(g_prim_mtoon, mto + 8, emr)
-          bytes.set_f32_le(g_prim_mtoon, mto + 12, emg)
-          bytes.set_f32_le(g_prim_mtoon, mto + 16, emb)
-          bytes.set_f32_le(g_prim_mtoon, mto + 20, rimr)
-          bytes.set_f32_le(g_prim_mtoon, mto + 24, rimg)
-          bytes.set_f32_le(g_prim_mtoon, mto + 28, rimb)
-          bytes.set_f32_le(g_prim_mtoon, mto + 32, rimp)
-          bytes.set_f32_le(g_prim_mtoon, mto + 36, riml)
-          bytes.set_i32_le(g_prim_mtoon, mto + 40, sh_tex)
-          bytes.set_i32_le(g_prim_mtoon, mto + 44, em_tex)
+          bytes.put_f32_le(g_prim_mtoon, mto, shift)
+          bytes.put_f32_le(g_prim_mtoon, mto + 4, toony)
+          bytes.put_f32_le(g_prim_mtoon, mto + 8, emr)
+          bytes.put_f32_le(g_prim_mtoon, mto + 12, emg)
+          bytes.put_f32_le(g_prim_mtoon, mto + 16, emb)
+          bytes.put_f32_le(g_prim_mtoon, mto + 20, rimr)
+          bytes.put_f32_le(g_prim_mtoon, mto + 24, rimg)
+          bytes.put_f32_le(g_prim_mtoon, mto + 28, rimb)
+          bytes.put_f32_le(g_prim_mtoon, mto + 32, rimp)
+          bytes.put_f32_le(g_prim_mtoon, mto + 36, riml)
+          bytes.put_i32_le(g_prim_mtoon, mto + 40, sh_tex)
+          bytes.put_i32_le(g_prim_mtoon, mto + 44, em_tex)
 
           // morph targets (POSITION deltas → pool)
           let n_tg = arr_len(prim, "targets")
           var tgi = 0
           while tgi < n_tg and tgi < MAX_TARGETS {
             let tg = arr_at(prim, "targets", tgi)
-            let tp_i = option.unwrap_or(json.get_int(tg, "POSITION"), 0 - 1)
+            let tp_i = option.unwrap_or(value.get_int(tg, "POSITION"), 0 - 1)
             var dp = 0
             if tp_i >= 0 then {
               let tb = acc_base(gltf, tp_i)
@@ -957,10 +957,10 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
           }
 
           // skinning binding (JOINTS_0 / WEIGHTS_0 → jw blob)
-          let msid = if mi < 64 then bytes.read_i32_le(g_meshskin, mi * 4) else 0 - 1
-          let attrs2 = option.unwrap_or(json.get(prim, "attributes"), json.null())
-          let j_i = option.unwrap_or(json.get_int(attrs2, "JOINTS_0"), 0 - 1)
-          let w_i = option.unwrap_or(json.get_int(attrs2, "WEIGHTS_0"), 0 - 1)
+          let msid = if mi < 64 then bytes.get_i32_le(g_meshskin, mi * 4) ?? 0 else 0 - 1
+          let attrs2 = option.unwrap_or(value.get(prim, "attributes"), value.null())
+          let j_i = option.unwrap_or(value.get_int(attrs2, "JOINTS_0"), 0 - 1)
+          let w_i = option.unwrap_or(value.get_int(attrs2, "WEIGHTS_0"), 0 - 1)
           if msid >= 0 and j_i >= 0 and w_i >= 0 then {
             let jb = acc_base(gltf, j_i)
             let jcs = acc_comp_size(gltf, j_i)
@@ -976,15 +976,15 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
                 var c5 = 0
                 while c5 < 4 {
                   let jsrc = bin_off + jb + v5 * jstr + c5 * jcs
-                  let jval = if jcs == 1 then bytes.read_u8(data, jsrc)
-                    else if jcs == 2 then bytes.read_u16_le(data, jsrc)
-                    else bytes.read_u32_le(data, jsrc)
-                  bytes.set_u16_le(g_pool, jo + c5 * 2, jval)
+                  let jval = if jcs == 1 then bytes.get(data, jsrc) ?? 0
+                    else if jcs == 2 then bytes.get_u16_le(data, jsrc) ?? 0
+                    else bytes.get_u32_le(data, jsrc) ?? 0
+                  bytes.put_u16_le(g_pool, jo + c5 * 2, jval)
                   let wsrc = bin_off + wb + v5 * wstr + c5 * wcs
-                  let wval = if wcs == 4 then bytes.read_f32_le(data, wsrc)
-                    else if wcs == 2 then int.to_float(bytes.read_u16_le(data, wsrc)) / 65535.0
-                    else int.to_float(bytes.read_u8(data, wsrc)) / 255.0
-                  bytes.set_f32_le(g_pool, jo + 8 + c5 * 4, wval)
+                  let wval = if wcs == 4 then bytes.get_f32_le(data, wsrc) ?? 0.0
+                    else if wcs == 2 then float.from(bytes.get_u16_le(data, wsrc) ?? 0) / 65535.0
+                    else float.from(bytes.get(data, wsrc) ?? 0) / 255.0
+                  bytes.put_f32_le(g_pool, jo + 8 + c5 * 4, wval)
                   c5 = c5 + 1
                 }
                 v5 = v5 + 1
@@ -999,17 +999,17 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
       }
       mi = mi + 1
     }
-    bytes.set_i32_le(g_n_prims, 0, pid)
+    bytes.put_i32_le(g_n_prims, 0, pid)
     pid
   }
 }
 
-pub fn get_prim_count() -> Int = bytes.read_i32_le(g_n_prims, 0)
+pub fn get_prim_count() -> Int = bytes.get_i32_le(g_n_prims, 0) ?? 0
 
 // re-upload a loaded image's texture in place (live recolor, no reload)
 pub fn update_image(i: Int, ptr: Int, len: Int) -> Int = {
   if i >= 0 and i < MAX_IMAGES and len > 0 then {
-    let t = bytes.read_i32_le(g_img_tex, i * 4)
+    let t = bytes.get_i32_le(g_img_tex, i * 4) ?? 0
     if t > 0 then { webgl.tex_image_2d_encoded(t, ptr, len); 0 } else { 0 - 1 }
   } else { 0 - 1 }
 }
@@ -1017,13 +1017,13 @@ pub fn update_image(i: Int, ptr: Int, len: Int) -> Int = {
 // debug: force a rim colour on every prim (plumbing verification)
 pub fn debug_rim(r: Float, g: Float, b: Float, p: Float) -> Int = {
   var i9 = 0
-  let np9 = bytes.read_i32_le(g_n_prims, 0)
+  let np9 = bytes.get_i32_le(g_n_prims, 0) ?? 0
   while i9 < np9 {
     let o9 = i9 * MTOON_BLOB
-    bytes.set_f32_le(g_prim_mtoon, o9 + 20, r)
-    bytes.set_f32_le(g_prim_mtoon, o9 + 24, g)
-    bytes.set_f32_le(g_prim_mtoon, o9 + 28, b)
-    bytes.set_f32_le(g_prim_mtoon, o9 + 32, p)
+    bytes.put_f32_le(g_prim_mtoon, o9 + 20, r)
+    bytes.put_f32_le(g_prim_mtoon, o9 + 24, g)
+    bytes.put_f32_le(g_prim_mtoon, o9 + 28, b)
+    bytes.put_f32_le(g_prim_mtoon, o9 + 32, p)
     i9 = i9 + 1
   }
   np9
@@ -1031,145 +1031,145 @@ pub fn debug_rim(r: Float, g: Float, b: Float, p: Float) -> Int = {
 
 // glTF original node index → skeleton slot (for host UI bone params)
 pub fn get_node_slot(orig: Int) -> Int =
-  if orig >= 0 and orig < MAX_NODES then bytes.read_i32_le(g_slotmap, orig * 4) else 0 - 1
+  if orig >= 0 and orig < MAX_NODES then bytes.get_i32_le(g_slotmap, orig * 4) ?? 0 else 0 - 1
 
 // debug: absolute work-buffer ptr of a prim (0 if none yet)
 pub fn get_prim_work(pid: Int) -> Int =
-  if pid >= 0 and pid < MAX_PRIMS then bytes.read_i32_le(g_prim_meta, pid * PRIM_STRIDE + 56) else 0
+  if pid >= 0 and pid < MAX_PRIMS then bytes.get_i32_le(g_prim_meta, pid * PRIM_STRIDE + 56) ?? 0 else 0
 
 // ── Skinning API ──
 
 pub fn set_skeleton(n: Int, nodes_ptr: Int) -> Int = {
   if n <= 0 or n > MAX_NODES then 0
   else {
-    bytes.set_i32_le(g_skel, 0, n)
-    bytes.set_i32_le(g_skel, 4, nodes_ptr)
-    bytes.set_i32_le(g_skel, 8, pool_alloc(n * 64))
-    bytes.set_i32_le(g_skel, 12, pool_alloc(64))
+    bytes.put_i32_le(g_skel, 0, n)
+    bytes.put_i32_le(g_skel, 4, nodes_ptr)
+    bytes.put_i32_le(g_skel, 8, pool_alloc(n * 64))
+    bytes.put_i32_le(g_skel, 12, pool_alloc(64))
     var i = 0
     while i < n {
-      bytes.set_f32_le(g_node_scale, i * 12, 1.0)
-      bytes.set_f32_le(g_node_scale, i * 12 + 4, 1.0)
-      bytes.set_f32_le(g_node_scale, i * 12 + 8, 1.0)
-      bytes.set_f32_le(g_node_off, i * 12, 0.0)
-      bytes.set_f32_le(g_node_off, i * 12 + 4, 0.0)
-      bytes.set_f32_le(g_node_off, i * 12 + 8, 0.0)
-      bytes.set_f32_le(g_node_rot, i * 16, 0.0)
-      bytes.set_f32_le(g_node_rot, i * 16 + 4, 0.0)
-      bytes.set_f32_le(g_node_rot, i * 16 + 8, 0.0)
-      bytes.set_f32_le(g_node_rot, i * 16 + 12, 1.0)
-      bytes.set_f32_le(g_spring_rot, i * 16, 0.0)
-      bytes.set_f32_le(g_spring_rot, i * 16 + 4, 0.0)
-      bytes.set_f32_le(g_spring_rot, i * 16 + 8, 0.0)
-      bytes.set_f32_le(g_spring_rot, i * 16 + 12, 1.0)
+      bytes.put_f32_le(g_node_scale, i * 12, 1.0)
+      bytes.put_f32_le(g_node_scale, i * 12 + 4, 1.0)
+      bytes.put_f32_le(g_node_scale, i * 12 + 8, 1.0)
+      bytes.put_f32_le(g_node_off, i * 12, 0.0)
+      bytes.put_f32_le(g_node_off, i * 12 + 4, 0.0)
+      bytes.put_f32_le(g_node_off, i * 12 + 8, 0.0)
+      bytes.put_f32_le(g_node_rot, i * 16, 0.0)
+      bytes.put_f32_le(g_node_rot, i * 16 + 4, 0.0)
+      bytes.put_f32_le(g_node_rot, i * 16 + 8, 0.0)
+      bytes.put_f32_le(g_node_rot, i * 16 + 12, 1.0)
+      bytes.put_f32_le(g_spring_rot, i * 16, 0.0)
+      bytes.put_f32_le(g_spring_rot, i * 16 + 4, 0.0)
+      bytes.put_f32_le(g_spring_rot, i * 16 + 8, 0.0)
+      bytes.put_f32_le(g_spring_rot, i * 16 + 12, 1.0)
       i = i + 1
     }
-    bytes.set_i32_le(g_spring, 0, 0)
-    bytes.set_i32_le(g_spring, 8, 0)
-    bytes.set_f32_le(g_spring, 16, 0.0)
-    bytes.set_i32_le(g_n_skins, 0, 0)
+    bytes.put_i32_le(g_spring, 0, 0)
+    bytes.put_i32_le(g_spring, 8, 0)
+    bytes.put_f32_le(g_spring, 16, 0.0)
+    bytes.put_i32_le(g_n_skins, 0, 0)
     n
   }
 }
 
 pub fn add_skin(n_joints: Int, joints_ptr: Int, ibm_ptr: Int) -> Int = {
-  let sid = bytes.read_i32_le(g_n_skins, 0)
+  let sid = bytes.get_i32_le(g_n_skins, 0) ?? 0
   if sid >= MAX_SKINS or n_joints <= 0 then 0 - 1
   else {
     let so = sid * 16
-    bytes.set_i32_le(g_skins, so, n_joints)
-    bytes.set_i32_le(g_skins, so + 4, joints_ptr)
-    bytes.set_i32_le(g_skins, so + 8, ibm_ptr)
-    bytes.set_i32_le(g_skins, so + 12, pool_alloc(n_joints * 64))
-    bytes.set_i32_le(g_n_skins, 0, sid + 1)
+    bytes.put_i32_le(g_skins, so, n_joints)
+    bytes.put_i32_le(g_skins, so + 4, joints_ptr)
+    bytes.put_i32_le(g_skins, so + 8, ibm_ptr)
+    bytes.put_i32_le(g_skins, so + 12, pool_alloc(n_joints * 64))
+    bytes.put_i32_le(g_n_skins, 0, sid + 1)
     sid
   }
 }
 
 pub fn set_prim_skin(pid: Int, sid: Int, jw_ptr: Int) -> Int = {
   if pid >= 0 and pid < MAX_PRIMS then {
-    bytes.set_i32_le(g_prim_skin, pid * 8, sid)
-    bytes.set_i32_le(g_prim_skin, pid * 8 + 4, jw_ptr)
+    bytes.put_i32_le(g_prim_skin, pid * 8, sid)
+    bytes.put_i32_le(g_prim_skin, pid * 8 + 4, jw_ptr)
     0
   } else 0
 }
 
 pub fn set_node_scale(slot: Int, sx: Float, sy: Float, sz: Float) -> Int = {
   if slot >= 0 and slot < MAX_NODES then {
-    bytes.set_f32_le(g_node_scale, slot * 12, sx)
-    bytes.set_f32_le(g_node_scale, slot * 12 + 4, sy)
-    bytes.set_f32_le(g_node_scale, slot * 12 + 8, sz)
+    bytes.put_f32_le(g_node_scale, slot * 12, sx)
+    bytes.put_f32_le(g_node_scale, slot * 12 + 4, sy)
+    bytes.put_f32_le(g_node_scale, slot * 12 + 8, sz)
     0
   } else 0
 }
 
 pub fn set_node_offset(slot: Int, dx: Float, dy: Float, dz: Float) -> Int = {
   if slot >= 0 and slot < MAX_NODES then {
-    bytes.set_f32_le(g_node_off, slot * 12, dx)
-    bytes.set_f32_le(g_node_off, slot * 12 + 4, dy)
-    bytes.set_f32_le(g_node_off, slot * 12 + 8, dz)
+    bytes.put_f32_le(g_node_off, slot * 12, dx)
+    bytes.put_f32_le(g_node_off, slot * 12 + 4, dy)
+    bytes.put_f32_le(g_node_off, slot * 12 + 8, dz)
     0
   } else 0
 }
 
 pub fn set_node_rotation(slot: Int, x: Float, y: Float, z: Float, w: Float) -> Int = {
   if slot >= 0 and slot < MAX_NODES then {
-    bytes.set_f32_le(g_node_rot, slot * 16, x)
-    bytes.set_f32_le(g_node_rot, slot * 16 + 4, y)
-    bytes.set_f32_le(g_node_rot, slot * 16 + 8, z)
-    bytes.set_f32_le(g_node_rot, slot * 16 + 12, w)
+    bytes.put_f32_le(g_node_rot, slot * 16, x)
+    bytes.put_f32_le(g_node_rot, slot * 16 + 4, y)
+    bytes.put_f32_le(g_node_rot, slot * 16 + 8, z)
+    bytes.put_f32_le(g_node_rot, slot * 16 + 12, w)
     0
   } else 0
 }
 
 pub fn set_light_dir(x: Float, y: Float, z: Float) -> Int = {
-  bytes.set_f32_le(g_view, 0, x)
-  bytes.set_f32_le(g_view, 4, y)
-  bytes.set_f32_le(g_view, 8, z)
+  bytes.put_f32_le(g_view, 0, x)
+  bytes.put_f32_le(g_view, 4, y)
+  bytes.put_f32_le(g_view, 8, z)
   0
 }
 
 pub fn set_spring_tune(gravity_add: Float, stiffness_mul: Float) -> Int = {
-  bytes.set_f32_le(g_spring_tune, 0, gravity_add)
-  bytes.set_f32_le(g_spring_tune, 4, stiffness_mul)
+  bytes.put_f32_le(g_spring_tune, 0, gravity_add)
+  bytes.put_f32_le(g_spring_tune, 4, stiffness_mul)
   0
 }
 
 pub fn set_bg(r: Float, g: Float, b: Float) -> Int = {
-  bytes.set_f32_le(g_view, 12, r)
-  bytes.set_f32_le(g_view, 16, g)
-  bytes.set_f32_le(g_view, 20, b)
+  bytes.put_f32_le(g_view, 12, r)
+  bytes.put_f32_le(g_view, 16, g)
+  bytes.put_f32_le(g_view, 20, b)
   0
 }
 
 // Recompute world matrices + skin palettes only (no prim rebuild).
 pub fn recompute_world() -> Int = {
-  let n = bytes.read_i32_le(g_skel, 0)
+  let n = bytes.get_i32_le(g_skel, 0) ?? 0
   if n == 0 then 0
   else {
     let base = bytes.data_ptr(g_pool)
-    let nodes = bytes.read_i32_le(g_skel, 4) - base
-    let world = bytes.read_i32_le(g_skel, 8) - base
-    let tmp = bytes.read_i32_le(g_skel, 12) - base
+    let nodes = bytes.get_i32_le(g_skel, 4) ?? 0 - base
+    let world = bytes.get_i32_le(g_skel, 8) ?? 0 - base
+    let tmp = bytes.get_i32_le(g_skel, 12) ?? 0 - base
     var i = 0
     while i < n {
       compose_local(tmp, i)
-      let parent = bytes.read_i32_le(g_pool, nodes + i * NODE_BLOB)
+      let parent = bytes.get_i32_le(g_pool, nodes + i * NODE_BLOB) ?? 0
       if parent < 0 then { bytes.copy_from(g_pool, g_pool, world + i * 64, tmp, 64) }
       else { m4_mul(world + i * 64, world + parent * 64, tmp) }
       i = i + 1
     }
-    let n_skins = bytes.read_i32_le(g_n_skins, 0)
+    let n_skins = bytes.get_i32_le(g_n_skins, 0) ?? 0
     var s = 0
     while s < n_skins {
       let so = s * 16
-      let nj = bytes.read_i32_le(g_skins, so)
-      let joints = bytes.read_i32_le(g_skins, so + 4) - base
-      let ibm = bytes.read_i32_le(g_skins, so + 8) - base
-      let pal = bytes.read_i32_le(g_skins, so + 12) - base
+      let nj = bytes.get_i32_le(g_skins, so) ?? 0
+      let joints = bytes.get_i32_le(g_skins, so + 4) ?? 0 - base
+      let ibm = bytes.get_i32_le(g_skins, so + 8) ?? 0 - base
+      let pal = bytes.get_i32_le(g_skins, so + 12) ?? 0 - base
       var j = 0
       while j < nj {
-        let slot = bytes.read_i32_le(g_pool, joints + j * 4)
+        let slot = bytes.get_i32_le(g_pool, joints + j * 4) ?? 0
         m4_mul(pal + j * 64, world + slot * 64, ibm + j * 64)
         j = j + 1
       }
@@ -1181,11 +1181,11 @@ pub fn recompute_world() -> Int = {
 
 // Recompute world matrices + skin palettes, then re-blend every prim.
 pub fn recompute_skin() -> Int = {
-  if bytes.read_i32_le(g_skel, 0) == 0 then 0
+  if bytes.get_i32_le(g_skel, 0) ?? 0 == 0 then 0
   else {
     let _ = recompute_world()
     var p = 0
-    let np = bytes.read_i32_le(g_n_prims, 0)
+    let np = bytes.get_i32_le(g_n_prims, 0) ?? 0
     while p < np {
       let _ = rebuild_prim(p)
       p = p + 1
@@ -1196,9 +1196,9 @@ pub fn recompute_skin() -> Int = {
 
 // world position (col3) of a slot, written to out_off (3 f32) in pool
 fn world_pos(world: Int, slot: Int, out_off: Int) -> Unit = {
-  bytes.set_f32_le(g_pool, out_off, bytes.read_f32_le(g_pool, world + slot * 64 + 48))
-  bytes.set_f32_le(g_pool, out_off + 4, bytes.read_f32_le(g_pool, world + slot * 64 + 52))
-  bytes.set_f32_le(g_pool, out_off + 8, bytes.read_f32_le(g_pool, world + slot * 64 + 56))
+  bytes.put_f32_le(g_pool, out_off, bytes.get_f32_le(g_pool, world + slot * 64 + 48) ?? 0.0)
+  bytes.put_f32_le(g_pool, out_off + 4, bytes.get_f32_le(g_pool, world + slot * 64 + 52) ?? 0.0)
+  bytes.put_f32_le(g_pool, out_off + 8, bytes.get_f32_le(g_pool, world + slot * 64 + 56) ?? 0.0)
 }
 
 // Spring-bone Verlet step (three-vrm faithful, world space, no center space).
@@ -1207,41 +1207,41 @@ fn world_pos(world: Int, slot: Int, out_off: Int) -> Unit = {
 //   2. simulate every joint against those rest matrices, write new spring quats
 //   3. recompute_skin → final matrices + palettes + vertex rebuild
 pub fn spring_tick(dt: Float) -> Int = {
-  let nj = bytes.read_i32_le(g_spring, 0)
+  let nj = bytes.get_i32_le(g_spring, 0) ?? 0
   if nj == 0 or dt <= 0.0 then 0
   else {
     let base = bytes.data_ptr(g_pool)
-    let jblob = bytes.read_i32_le(g_spring, 4) - base
-    let ncol = bytes.read_i32_le(g_spring, 8)
-    let cblob = bytes.read_i32_le(g_spring, 12) - base
-    let world = bytes.read_i32_le(g_skel, 8) - base
+    let jblob = bytes.get_i32_le(g_spring, 4) ?? 0 - base
+    let ncol = bytes.get_i32_le(g_spring, 8) ?? 0
+    let cblob = bytes.get_i32_le(g_spring, 12) ?? 0 - base
+    let world = bytes.get_i32_le(g_skel, 8) ?? 0 - base
     // 1: rest-with-pose world (spring layer zeroed)
     var z = 0
-    let nn = bytes.read_i32_le(g_skel, 0)
+    let nn = bytes.get_i32_le(g_skel, 0) ?? 0
     while z < nn {
-      bytes.set_f32_le(g_spring_rot, z * 16, 0.0)
-      bytes.set_f32_le(g_spring_rot, z * 16 + 4, 0.0)
-      bytes.set_f32_le(g_spring_rot, z * 16 + 8, 0.0)
-      bytes.set_f32_le(g_spring_rot, z * 16 + 12, 1.0)
+      bytes.put_f32_le(g_spring_rot, z * 16, 0.0)
+      bytes.put_f32_le(g_spring_rot, z * 16 + 4, 0.0)
+      bytes.put_f32_le(g_spring_rot, z * 16 + 8, 0.0)
+      bytes.put_f32_le(g_spring_rot, z * 16 + 12, 1.0)
       z = z + 1
     }
     let _ = recompute_world()
     // scratch: bone pos (12B) + child rest pos (12B)
-    let tmp = bytes.read_i32_le(g_skel, 12) - base   // reuse 64B compose scratch
+    let tmp = bytes.get_i32_le(g_skel, 12) ?? 0 - base   // reuse 64B compose scratch
     var ji = 0
     while ji < nj {
       let jo = jblob + ji * SPRING_BLOB
-      let bone = bytes.read_i32_le(g_pool, jo)
-      let child = bytes.read_i32_le(g_pool, jo + 4)
+      let bone = bytes.get_i32_le(g_pool, jo) ?? 0
+      let child = bytes.get_i32_le(g_pool, jo + 4) ?? 0
       if bone >= 0 and child >= 0 then {
         world_pos(world, bone, tmp)
         world_pos(world, child, tmp + 16)
-        let bx2 = bytes.read_f32_le(g_pool, tmp)
-        let by2 = bytes.read_f32_le(g_pool, tmp + 4)
-        let bz2 = bytes.read_f32_le(g_pool, tmp + 8)
-        let rx = bytes.read_f32_le(g_pool, tmp + 16)
-        let ry = bytes.read_f32_le(g_pool, tmp + 20)
-        let rz = bytes.read_f32_le(g_pool, tmp + 24)
+        let bx2 = bytes.get_f32_le(g_pool, tmp) ?? 0.0
+        let by2 = bytes.get_f32_le(g_pool, tmp + 4) ?? 0.0
+        let bz2 = bytes.get_f32_le(g_pool, tmp + 8) ?? 0.0
+        let rx = bytes.get_f32_le(g_pool, tmp + 16) ?? 0.0
+        let ry = bytes.get_f32_le(g_pool, tmp + 20) ?? 0.0
+        let rz = bytes.get_f32_le(g_pool, tmp + 24) ?? 0.0
         var ax = rx - bx2
         var ay = ry - by2
         var az = rz - bz2
@@ -1251,28 +1251,28 @@ pub fn spring_tick(dt: Float) -> Int = {
           ay = ay / blen
           az = az / blen
           // first tick: tails start at the rest child position
-          if bytes.read_i32_le(g_pool, jo + 88) == 0 then {
-            bytes.set_f32_le(g_pool, jo + 52, rx)
-            bytes.set_f32_le(g_pool, jo + 56, ry)
-            bytes.set_f32_le(g_pool, jo + 60, rz)
-            bytes.set_f32_le(g_pool, jo + 64, rx)
-            bytes.set_f32_le(g_pool, jo + 68, ry)
-            bytes.set_f32_le(g_pool, jo + 72, rz)
-            bytes.set_i32_le(g_pool, jo + 88, 1)
+          if bytes.get_i32_le(g_pool, jo + 88) ?? 0 == 0 then {
+            bytes.put_f32_le(g_pool, jo + 52, rx)
+            bytes.put_f32_le(g_pool, jo + 56, ry)
+            bytes.put_f32_le(g_pool, jo + 60, rz)
+            bytes.put_f32_le(g_pool, jo + 64, rx)
+            bytes.put_f32_le(g_pool, jo + 68, ry)
+            bytes.put_f32_le(g_pool, jo + 72, rz)
+            bytes.put_i32_le(g_pool, jo + 88, 1)
           } else {}
-          let stiff = bytes.read_f32_le(g_pool, jo + 8) * bytes.read_f32_le(g_spring_tune, 4)
-          let gpow = bytes.read_f32_le(g_pool, jo + 12) + bytes.read_f32_le(g_spring_tune, 0)
-          let gdx = bytes.read_f32_le(g_pool, jo + 16)
-          let gdy = bytes.read_f32_le(g_pool, jo + 20)
-          let gdz = bytes.read_f32_le(g_pool, jo + 24)
-          let drag = bytes.read_f32_le(g_pool, jo + 28)
-          let hitr = bytes.read_f32_le(g_pool, jo + 32)
-          let cx = bytes.read_f32_le(g_pool, jo + 52)
-          let cy = bytes.read_f32_le(g_pool, jo + 56)
-          let cz = bytes.read_f32_le(g_pool, jo + 60)
-          let px2 = bytes.read_f32_le(g_pool, jo + 64)
-          let py2 = bytes.read_f32_le(g_pool, jo + 68)
-          let pz2 = bytes.read_f32_le(g_pool, jo + 72)
+          let stiff = bytes.get_f32_le(g_pool, jo + 8) ?? 0.0 * bytes.get_f32_le(g_spring_tune, 4) ?? 0.0
+          let gpow = bytes.get_f32_le(g_pool, jo + 12) ?? 0.0 + bytes.get_f32_le(g_spring_tune, 0) ?? 0.0
+          let gdx = bytes.get_f32_le(g_pool, jo + 16) ?? 0.0
+          let gdy = bytes.get_f32_le(g_pool, jo + 20) ?? 0.0
+          let gdz = bytes.get_f32_le(g_pool, jo + 24) ?? 0.0
+          let drag = bytes.get_f32_le(g_pool, jo + 28) ?? 0.0
+          let hitr = bytes.get_f32_le(g_pool, jo + 32) ?? 0.0
+          let cx = bytes.get_f32_le(g_pool, jo + 52) ?? 0.0
+          let cy = bytes.get_f32_le(g_pool, jo + 56) ?? 0.0
+          let cz = bytes.get_f32_le(g_pool, jo + 60) ?? 0.0
+          let px2 = bytes.get_f32_le(g_pool, jo + 64) ?? 0.0
+          let py2 = bytes.get_f32_le(g_pool, jo + 68) ?? 0.0
+          let pz2 = bytes.get_f32_le(g_pool, jo + 72) ?? 0.0
           // Verlet
           var nx = cx + (cx - px2) * (1.0 - drag) + ax * stiff * dt + gdx * gpow * dt
           var ny = cy + (cy - py2) * (1.0 - drag) + ay * stiff * dt + gdy * gpow * dt
@@ -1290,19 +1290,19 @@ pub fn spring_tick(dt: Float) -> Int = {
           var ci = 0
           while ci < ncol {
             let co = cblob + ci * COLLIDER_BLOB
-            let cslot = bytes.read_i32_le(g_pool, co)
+            let cslot = bytes.get_i32_le(g_pool, co) ?? 0
             if cslot >= 0 then {
               // collider centre = node world pos + offset rotated by node world
-              let cwx = bytes.read_f32_le(g_pool, world + cslot * 64 + 48)
-              let cwy = bytes.read_f32_le(g_pool, world + cslot * 64 + 52)
-              let cwz = bytes.read_f32_le(g_pool, world + cslot * 64 + 56)
-              let ox = bytes.read_f32_le(g_pool, co + 4)
-              let oy = bytes.read_f32_le(g_pool, co + 8)
-              let oz = bytes.read_f32_le(g_pool, co + 12)
-              let ccx = cwx + bytes.read_f32_le(g_pool, world + cslot * 64) * ox + bytes.read_f32_le(g_pool, world + cslot * 64 + 16) * oy + bytes.read_f32_le(g_pool, world + cslot * 64 + 32) * oz
-              let ccy = cwy + bytes.read_f32_le(g_pool, world + cslot * 64 + 4) * ox + bytes.read_f32_le(g_pool, world + cslot * 64 + 20) * oy + bytes.read_f32_le(g_pool, world + cslot * 64 + 36) * oz
-              let ccz = cwz + bytes.read_f32_le(g_pool, world + cslot * 64 + 8) * ox + bytes.read_f32_le(g_pool, world + cslot * 64 + 24) * oy + bytes.read_f32_le(g_pool, world + cslot * 64 + 40) * oz
-              let rad = bytes.read_f32_le(g_pool, co + 16) + hitr
+              let cwx = bytes.get_f32_le(g_pool, world + cslot * 64 + 48) ?? 0.0
+              let cwy = bytes.get_f32_le(g_pool, world + cslot * 64 + 52) ?? 0.0
+              let cwz = bytes.get_f32_le(g_pool, world + cslot * 64 + 56) ?? 0.0
+              let ox = bytes.get_f32_le(g_pool, co + 4) ?? 0.0
+              let oy = bytes.get_f32_le(g_pool, co + 8) ?? 0.0
+              let oz = bytes.get_f32_le(g_pool, co + 12) ?? 0.0
+              let ccx = cwx + bytes.get_f32_le(g_pool, world + cslot * 64) ?? 0.0 * ox + bytes.get_f32_le(g_pool, world + cslot * 64 + 16) ?? 0.0 * oy + bytes.get_f32_le(g_pool, world + cslot * 64 + 32) ?? 0.0 * oz
+              let ccy = cwy + bytes.get_f32_le(g_pool, world + cslot * 64 + 4) ?? 0.0 * ox + bytes.get_f32_le(g_pool, world + cslot * 64 + 20) ?? 0.0 * oy + bytes.get_f32_le(g_pool, world + cslot * 64 + 36) ?? 0.0 * oz
+              let ccz = cwz + bytes.get_f32_le(g_pool, world + cslot * 64 + 8) ?? 0.0 * ox + bytes.get_f32_le(g_pool, world + cslot * 64 + 24) ?? 0.0 * oy + bytes.get_f32_le(g_pool, world + cslot * 64 + 40) ?? 0.0 * oz
+              let rad = bytes.get_f32_le(g_pool, co + 16) ?? 0.0 + hitr
               var ex = nx - ccx
               var ey = ny - ccy
               var ez = nz - ccz
@@ -1326,12 +1326,12 @@ pub fn spring_tick(dt: Float) -> Int = {
             ci = ci + 1
           }
           // store tails
-          bytes.set_f32_le(g_pool, jo + 64, cx)
-          bytes.set_f32_le(g_pool, jo + 68, cy)
-          bytes.set_f32_le(g_pool, jo + 72, cz)
-          bytes.set_f32_le(g_pool, jo + 52, nx)
-          bytes.set_f32_le(g_pool, jo + 56, ny)
-          bytes.set_f32_le(g_pool, jo + 60, nz)
+          bytes.put_f32_le(g_pool, jo + 64, cx)
+          bytes.put_f32_le(g_pool, jo + 68, cy)
+          bytes.put_f32_le(g_pool, jo + 72, cz)
+          bytes.put_f32_le(g_pool, jo + 52, nx)
+          bytes.put_f32_le(g_pool, jo + 56, ny)
+          bytes.put_f32_le(g_pool, jo + 60, nz)
           // spring quat: world-space fromTo(restDir, newDir) localized via the
           // bone's rest-world ROTATION (VRM node scales on spring chains are 1,
           // so the transpose is the inverse).
@@ -1339,15 +1339,15 @@ pub fn spring_tick(dt: Float) -> Int = {
           let ndy = (ny - by2) / blen
           let ndz = (nz - bz2) / blen
           // localize both dirs by R^T of bone rest world
-          let m0 = bytes.read_f32_le(g_pool, world + bone * 64)
-          let m1 = bytes.read_f32_le(g_pool, world + bone * 64 + 4)
-          let m2 = bytes.read_f32_le(g_pool, world + bone * 64 + 8)
-          let m4 = bytes.read_f32_le(g_pool, world + bone * 64 + 16)
-          let m5 = bytes.read_f32_le(g_pool, world + bone * 64 + 20)
-          let m6 = bytes.read_f32_le(g_pool, world + bone * 64 + 24)
-          let m8 = bytes.read_f32_le(g_pool, world + bone * 64 + 32)
-          let m9 = bytes.read_f32_le(g_pool, world + bone * 64 + 36)
-          let m10 = bytes.read_f32_le(g_pool, world + bone * 64 + 40)
+          let m0 = bytes.get_f32_le(g_pool, world + bone * 64) ?? 0.0
+          let m1 = bytes.get_f32_le(g_pool, world + bone * 64 + 4) ?? 0.0
+          let m2 = bytes.get_f32_le(g_pool, world + bone * 64 + 8) ?? 0.0
+          let m4 = bytes.get_f32_le(g_pool, world + bone * 64 + 16) ?? 0.0
+          let m5 = bytes.get_f32_le(g_pool, world + bone * 64 + 20) ?? 0.0
+          let m6 = bytes.get_f32_le(g_pool, world + bone * 64 + 24) ?? 0.0
+          let m8 = bytes.get_f32_le(g_pool, world + bone * 64 + 32) ?? 0.0
+          let m9 = bytes.get_f32_le(g_pool, world + bone * 64 + 36) ?? 0.0
+          let m10 = bytes.get_f32_le(g_pool, world + bone * 64 + 40) ?? 0.0
           let lax = m0 * ax + m1 * ay + m2 * az
           let lay = m4 * ax + m5 * ay + m6 * az
           let laz = m8 * ax + m9 * ay + m10 * az
@@ -1361,10 +1361,10 @@ pub fn spring_tick(dt: Float) -> Int = {
           var qw2 = 1.0 + lax * lnx + lay * lny + laz * lnz
           let qn = math.sqrt(qx2 * qx2 + qy2 * qy2 + qz2 * qz2 + qw2 * qw2)
           if qn > 0.000001 then {
-            bytes.set_f32_le(g_spring_rot, bone * 16, qx2 / qn)
-            bytes.set_f32_le(g_spring_rot, bone * 16 + 4, qy2 / qn)
-            bytes.set_f32_le(g_spring_rot, bone * 16 + 8, qz2 / qn)
-            bytes.set_f32_le(g_spring_rot, bone * 16 + 12, qw2 / qn)
+            bytes.put_f32_le(g_spring_rot, bone * 16, qx2 / qn)
+            bytes.put_f32_le(g_spring_rot, bone * 16 + 4, qy2 / qn)
+            bytes.put_f32_le(g_spring_rot, bone * 16 + 8, qz2 / qn)
+            bytes.put_f32_le(g_spring_rot, bone * 16 + 12, qw2 / qn)
           } else {}
         } else {}
       } else {}
@@ -1385,18 +1385,18 @@ pub fn spring_tick(dt: Float) -> Int = {
 pub fn reset_prims() -> Int = {
   // a reload window must not leave stale skeleton/spring state visible to the
   // concurrently-running render loop (rAF keeps firing during openDocument)
-  bytes.set_i32_le(g_spring, 0, 0)
-  bytes.set_f32_le(g_spring, 16, 0.0)
-  bytes.set_i32_le(g_skel, 0, 0)
-  bytes.set_i32_le(g_n_skins, 0, 0)
-  bytes.set_i32_le(g_n_prims, 0, 0)
+  bytes.put_i32_le(g_spring, 0, 0)
+  bytes.put_f32_le(g_spring, 16, 0.0)
+  bytes.put_i32_le(g_skel, 0, 0)
+  bytes.put_i32_le(g_n_skins, 0, 0)
+  bytes.put_i32_le(g_n_prims, 0, 0)
   0
 }
 
 pub fn add_prim(vptr: Int, vcount: Int, iptr: Int, icount: Int,
                 img_ptr: Int, img_len: Int, sr: Float, sg: Float, sb: Float,
                 alpha_mode: Int, ow: Float, ocr: Float, ocg: Float, ocb: Float) -> Int = {
-  let pid = bytes.read_i32_le(g_n_prims, 0)
+  let pid = bytes.get_i32_le(g_n_prims, 0) ?? 0
   if pid >= MAX_PRIMS or icount <= 0 or vcount <= 0 then pid
   else {
     let vbo = webgl.create_buffer()
@@ -1412,38 +1412,38 @@ pub fn add_prim(vptr: Int, vcount: Int, iptr: Int, icount: Int,
       tex = t
     } else {}
     let po = pid * PRIM_STRIDE
-    bytes.set_i32_le(g_prim_meta, po, vbo)
-    bytes.set_i32_le(g_prim_meta, po + 4, ibo)
-    bytes.set_i32_le(g_prim_meta, po + 8, icount)
-    bytes.set_i32_le(g_prim_meta, po + 12, tex)
-    bytes.set_f32_le(g_prim_meta, po + 16, sr)
-    bytes.set_f32_le(g_prim_meta, po + 20, sg)
-    bytes.set_f32_le(g_prim_meta, po + 24, sb)
-    bytes.set_i32_le(g_prim_meta, po + 28, alpha_mode)
-    bytes.set_f32_le(g_prim_meta, po + 32, ow)
-    bytes.set_f32_le(g_prim_meta, po + 36, ocr)
-    bytes.set_f32_le(g_prim_meta, po + 40, ocg)
-    bytes.set_f32_le(g_prim_meta, po + 44, ocb)
-    bytes.set_i32_le(g_prim_meta, po + 48, vptr)
-    bytes.set_i32_le(g_prim_meta, po + 52, vcount)
-    bytes.set_i32_le(g_prim_meta, po + 56, 0)
-    bytes.set_i32_le(g_prim_meta, po + 60, 0)
-    bytes.set_i32_le(g_prim_skin, pid * 8, 0 - 1)
-    bytes.set_i32_le(g_prim_skin, pid * 8 + 4, 0)
+    bytes.put_i32_le(g_prim_meta, po, vbo)
+    bytes.put_i32_le(g_prim_meta, po + 4, ibo)
+    bytes.put_i32_le(g_prim_meta, po + 8, icount)
+    bytes.put_i32_le(g_prim_meta, po + 12, tex)
+    bytes.put_f32_le(g_prim_meta, po + 16, sr)
+    bytes.put_f32_le(g_prim_meta, po + 20, sg)
+    bytes.put_f32_le(g_prim_meta, po + 24, sb)
+    bytes.put_i32_le(g_prim_meta, po + 28, alpha_mode)
+    bytes.put_f32_le(g_prim_meta, po + 32, ow)
+    bytes.put_f32_le(g_prim_meta, po + 36, ocr)
+    bytes.put_f32_le(g_prim_meta, po + 40, ocg)
+    bytes.put_f32_le(g_prim_meta, po + 44, ocb)
+    bytes.put_i32_le(g_prim_meta, po + 48, vptr)
+    bytes.put_i32_le(g_prim_meta, po + 52, vcount)
+    bytes.put_i32_le(g_prim_meta, po + 56, 0)
+    bytes.put_i32_le(g_prim_meta, po + 60, 0)
+    bytes.put_i32_le(g_prim_skin, pid * 8, 0 - 1)
+    bytes.put_i32_le(g_prim_skin, pid * 8 + 4, 0)
     let mto2 = pid * MTOON_BLOB
-    bytes.set_f32_le(g_prim_mtoon, mto2, 0.0 - 0.05)
-    bytes.set_f32_le(g_prim_mtoon, mto2 + 4, 0.9)
-    bytes.set_f32_le(g_prim_mtoon, mto2 + 8, 0.0)
-    bytes.set_f32_le(g_prim_mtoon, mto2 + 12, 0.0)
-    bytes.set_f32_le(g_prim_mtoon, mto2 + 16, 0.0)
-    bytes.set_f32_le(g_prim_mtoon, mto2 + 20, 0.0)
-    bytes.set_f32_le(g_prim_mtoon, mto2 + 24, 0.0)
-    bytes.set_f32_le(g_prim_mtoon, mto2 + 28, 0.0)
-    bytes.set_f32_le(g_prim_mtoon, mto2 + 32, 5.0)
-    bytes.set_f32_le(g_prim_mtoon, mto2 + 36, 0.0)
-    bytes.set_i32_le(g_prim_mtoon, mto2 + 40, 0 - 1)
-    bytes.set_i32_le(g_prim_mtoon, mto2 + 44, 0 - 1)
-    bytes.set_i32_le(g_n_prims, 0, pid + 1)
+    bytes.put_f32_le(g_prim_mtoon, mto2, 0.0 - 0.05)
+    bytes.put_f32_le(g_prim_mtoon, mto2 + 4, 0.9)
+    bytes.put_f32_le(g_prim_mtoon, mto2 + 8, 0.0)
+    bytes.put_f32_le(g_prim_mtoon, mto2 + 12, 0.0)
+    bytes.put_f32_le(g_prim_mtoon, mto2 + 16, 0.0)
+    bytes.put_f32_le(g_prim_mtoon, mto2 + 20, 0.0)
+    bytes.put_f32_le(g_prim_mtoon, mto2 + 24, 0.0)
+    bytes.put_f32_le(g_prim_mtoon, mto2 + 28, 0.0)
+    bytes.put_f32_le(g_prim_mtoon, mto2 + 32, 5.0)
+    bytes.put_f32_le(g_prim_mtoon, mto2 + 36, 0.0)
+    bytes.put_i32_le(g_prim_mtoon, mto2 + 40, 0 - 1)
+    bytes.put_i32_le(g_prim_mtoon, mto2 + 44, 0 - 1)
+    bytes.put_i32_le(g_n_prims, 0, pid + 1)
     pid + 1
   }
 }
@@ -1455,17 +1455,17 @@ pub fn pool_ptr() -> Int = bytes.data_ptr(g_pool)
 // Bump-allocate n bytes (4-aligned) inside g_pool; returns ABSOLUTE address.
 // 0 = pool exhausted.
 pub fn pool_alloc(n: Int) -> Int = {
-  let used = bytes.read_i32_le(g_pool_used, 0)
+  let used = bytes.get_i32_le(g_pool_used, 0) ?? 0
   let aligned = (n + 3) / 4 * 4
   if used + aligned > POOL_SIZE then 0
   else {
-    bytes.set_i32_le(g_pool_used, 0, used + aligned)
+    bytes.put_i32_le(g_pool_used, 0, used + aligned)
     bytes.data_ptr(g_pool) + used
   }
 }
 
 pub fn pool_reset() -> Int = {
-  bytes.set_i32_le(g_pool_used, 0, 0)
+  bytes.put_i32_le(g_pool_used, 0, 0)
   0
 }
 
@@ -1475,13 +1475,13 @@ pub fn add_morph_target(pid: Int, delta_ptr: Int) -> Int = {
   if pid < 0 or pid >= MAX_PRIMS then 0
   else {
     let po = pid * PRIM_STRIDE
-    let cnt = bytes.read_i32_le(g_prim_meta, po + 60)
+    let cnt = bytes.get_i32_le(g_prim_meta, po + 60) ?? 0
     if cnt >= MAX_TARGETS then cnt
     else {
       let slot = (pid * MAX_TARGETS + cnt) * 4
-      bytes.set_i32_le(g_mt_ptr, slot, delta_ptr)
-      bytes.set_f32_le(g_mt_w, slot, 0.0)
-      bytes.set_i32_le(g_prim_meta, po + 60, cnt + 1)
+      bytes.put_i32_le(g_mt_ptr, slot, delta_ptr)
+      bytes.put_f32_le(g_mt_w, slot, 0.0)
+      bytes.put_i32_le(g_prim_meta, po + 60, cnt + 1)
       cnt + 1
     }
   }
@@ -1489,7 +1489,7 @@ pub fn add_morph_target(pid: Int, delta_ptr: Int) -> Int = {
 
 pub fn set_morph_weight(pid: Int, ti: Int, w: Float) -> Int = {
   if pid >= 0 and pid < MAX_PRIMS and ti >= 0 and ti < MAX_TARGETS then {
-    bytes.set_f32_le(g_mt_w, (pid * MAX_TARGETS + ti) * 4, w)
+    bytes.put_f32_le(g_mt_w, (pid * MAX_TARGETS + ti) * 4, w)
     0
   } else 0
 }
@@ -1497,17 +1497,17 @@ pub fn set_morph_weight(pid: Int, ti: Int, w: Float) -> Int = {
 // Skin-blend positions+normals of `vc` vertices in-place at work_off.
 // jw blob: per vertex [u16 x4 joint indices][f32 x4 weights] = 24B.
 fn skin_blend(work_off: Int, vc: Int, sid: Int, jw_off: Int) -> Unit = {
-  let pal = bytes.read_i32_le(g_skins, sid * 16 + 12) - bytes.data_ptr(g_pool)
+  let pal = bytes.get_i32_le(g_skins, sid * 16 + 12) ?? 0 - bytes.data_ptr(g_pool)
   var vi = 0
   while vi < vc {
     let wo = work_off + vi * STRIDE
     let jo = jw_off + vi * 24
-    let px = bytes.read_f32_le(g_pool, wo)
-    let py = bytes.read_f32_le(g_pool, wo + 4)
-    let pz = bytes.read_f32_le(g_pool, wo + 8)
-    let nx = bytes.read_f32_le(g_pool, wo + 12)
-    let ny = bytes.read_f32_le(g_pool, wo + 16)
-    let nz = bytes.read_f32_le(g_pool, wo + 20)
+    let px = bytes.get_f32_le(g_pool, wo) ?? 0.0
+    let py = bytes.get_f32_le(g_pool, wo + 4) ?? 0.0
+    let pz = bytes.get_f32_le(g_pool, wo + 8) ?? 0.0
+    let nx = bytes.get_f32_le(g_pool, wo + 12) ?? 0.0
+    let ny = bytes.get_f32_le(g_pool, wo + 16) ?? 0.0
+    let nz = bytes.get_f32_le(g_pool, wo + 20) ?? 0.0
     var ox = 0.0
     var oy = 0.0
     var oz = 0.0
@@ -1516,45 +1516,45 @@ fn skin_blend(work_off: Int, vc: Int, sid: Int, jw_off: Int) -> Unit = {
     var mz = 0.0
     var k = 0
     while k < 4 {
-      let w = bytes.read_f32_le(g_pool, jo + 8 + k * 4)
+      let w = bytes.get_f32_le(g_pool, jo + 8 + k * 4) ?? 0.0
       if w > 0.00001 then {
-        let m = pal + bytes.read_u16_le(g_pool, jo + k * 2) * 64
-        ox = ox + w * (bytes.read_f32_le(g_pool, m) * px + bytes.read_f32_le(g_pool, m + 16) * py + bytes.read_f32_le(g_pool, m + 32) * pz + bytes.read_f32_le(g_pool, m + 48))
-        oy = oy + w * (bytes.read_f32_le(g_pool, m + 4) * px + bytes.read_f32_le(g_pool, m + 20) * py + bytes.read_f32_le(g_pool, m + 36) * pz + bytes.read_f32_le(g_pool, m + 52))
-        oz = oz + w * (bytes.read_f32_le(g_pool, m + 8) * px + bytes.read_f32_le(g_pool, m + 24) * py + bytes.read_f32_le(g_pool, m + 40) * pz + bytes.read_f32_le(g_pool, m + 56))
-        mx = mx + w * (bytes.read_f32_le(g_pool, m) * nx + bytes.read_f32_le(g_pool, m + 16) * ny + bytes.read_f32_le(g_pool, m + 32) * nz)
-        my = my + w * (bytes.read_f32_le(g_pool, m + 4) * nx + bytes.read_f32_le(g_pool, m + 20) * ny + bytes.read_f32_le(g_pool, m + 36) * nz)
-        mz = mz + w * (bytes.read_f32_le(g_pool, m + 8) * nx + bytes.read_f32_le(g_pool, m + 24) * ny + bytes.read_f32_le(g_pool, m + 40) * nz)
+        let m = pal + bytes.get_u16_le(g_pool, jo + k * 2) ?? 0 * 64
+        ox = ox + w * (bytes.get_f32_le(g_pool, m) ?? 0.0 * px + bytes.get_f32_le(g_pool, m + 16) ?? 0.0 * py + bytes.get_f32_le(g_pool, m + 32) ?? 0.0 * pz + bytes.get_f32_le(g_pool, m + 48) ?? 0.0)
+        oy = oy + w * (bytes.get_f32_le(g_pool, m + 4) ?? 0.0 * px + bytes.get_f32_le(g_pool, m + 20) ?? 0.0 * py + bytes.get_f32_le(g_pool, m + 36) ?? 0.0 * pz + bytes.get_f32_le(g_pool, m + 52) ?? 0.0)
+        oz = oz + w * (bytes.get_f32_le(g_pool, m + 8) ?? 0.0 * px + bytes.get_f32_le(g_pool, m + 24) ?? 0.0 * py + bytes.get_f32_le(g_pool, m + 40) ?? 0.0 * pz + bytes.get_f32_le(g_pool, m + 56) ?? 0.0)
+        mx = mx + w * (bytes.get_f32_le(g_pool, m) ?? 0.0 * nx + bytes.get_f32_le(g_pool, m + 16) ?? 0.0 * ny + bytes.get_f32_le(g_pool, m + 32) ?? 0.0 * nz)
+        my = my + w * (bytes.get_f32_le(g_pool, m + 4) ?? 0.0 * nx + bytes.get_f32_le(g_pool, m + 20) ?? 0.0 * ny + bytes.get_f32_le(g_pool, m + 36) ?? 0.0 * nz)
+        mz = mz + w * (bytes.get_f32_le(g_pool, m + 8) ?? 0.0 * nx + bytes.get_f32_le(g_pool, m + 24) ?? 0.0 * ny + bytes.get_f32_le(g_pool, m + 40) ?? 0.0 * nz)
       } else {}
       k = k + 1
     }
-    bytes.set_f32_le(g_pool, wo, ox)
-    bytes.set_f32_le(g_pool, wo + 4, oy)
-    bytes.set_f32_le(g_pool, wo + 8, oz)
-    bytes.set_f32_le(g_pool, wo + 12, mx)
-    bytes.set_f32_le(g_pool, wo + 16, my)
-    bytes.set_f32_le(g_pool, wo + 20, mz)
+    bytes.put_f32_le(g_pool, wo, ox)
+    bytes.put_f32_le(g_pool, wo + 4, oy)
+    bytes.put_f32_le(g_pool, wo + 8, oz)
+    bytes.put_f32_le(g_pool, wo + 12, mx)
+    bytes.put_f32_le(g_pool, wo + 16, my)
+    bytes.put_f32_le(g_pool, wo + 20, mz)
     vi = vi + 1
   }
 }
 
 // Re-blend prim `pid`: base verts → morph deltas → skinning → re-upload VBO.
 pub fn rebuild_prim(pid: Int) -> Int = {
-  if pid < 0 or pid >= bytes.read_i32_le(g_n_prims, 0) then 0
+  if pid < 0 or pid >= bytes.get_i32_le(g_n_prims, 0) ?? 0 then 0
   else {
     let po = pid * PRIM_STRIDE
-    let vptr = bytes.read_i32_le(g_prim_meta, po + 48)
-    let vc = bytes.read_i32_le(g_prim_meta, po + 52)
-    let cnt = bytes.read_i32_le(g_prim_meta, po + 60)
-    let sid = bytes.read_i32_le(g_prim_skin, pid * 8)
-    let jw = bytes.read_i32_le(g_prim_skin, pid * 8 + 4)
-    let skinned = sid >= 0 and jw != 0 and bytes.read_i32_le(g_skel, 0) > 0
+    let vptr = bytes.get_i32_le(g_prim_meta, po + 48) ?? 0
+    let vc = bytes.get_i32_le(g_prim_meta, po + 52) ?? 0
+    let cnt = bytes.get_i32_le(g_prim_meta, po + 60) ?? 0
+    let sid = bytes.get_i32_le(g_prim_skin, pid * 8) ?? 0
+    let jw = bytes.get_i32_le(g_prim_skin, pid * 8 + 4) ?? 0
+    let skinned = sid >= 0 and jw != 0 and bytes.get_i32_le(g_skel, 0) ?? 0 > 0
     if vptr == 0 or vc == 0 or (cnt == 0 and skinned == false) then 0
     else {
-      var work = bytes.read_i32_le(g_prim_meta, po + 56)
+      var work = bytes.get_i32_le(g_prim_meta, po + 56) ?? 0
       if work == 0 then {
         work = pool_alloc(vc * STRIDE)
-        bytes.set_i32_le(g_prim_meta, po + 56, work)
+        bytes.put_i32_le(g_prim_meta, po + 56, work)
       } else {}
       if work == 0 then 0
       else {
@@ -1565,23 +1565,23 @@ pub fn rebuild_prim(pid: Int) -> Int = {
         var ti = 0
         while ti < cnt {
           let slot = (pid * MAX_TARGETS + ti) * 4
-          let w = bytes.read_f32_le(g_mt_w, slot)
+          let w = bytes.get_f32_le(g_mt_w, slot) ?? 0.0
           if w > 0.0001 or w < 0.0 - 0.0001 then {
-            let d_off = bytes.read_i32_le(g_mt_ptr, slot) - base
+            let d_off = bytes.get_i32_le(g_mt_ptr, slot) ?? 0 - base
             var vi = 0
             while vi < vc {
               let wo = dst_off + vi * STRIDE
               let so = d_off + vi * 12
-              bytes.set_f32_le(g_pool, wo, bytes.read_f32_le(g_pool, wo) + bytes.read_f32_le(g_pool, so) * w)
-              bytes.set_f32_le(g_pool, wo + 4, bytes.read_f32_le(g_pool, wo + 4) + bytes.read_f32_le(g_pool, so + 4) * w)
-              bytes.set_f32_le(g_pool, wo + 8, bytes.read_f32_le(g_pool, wo + 8) + bytes.read_f32_le(g_pool, so + 8) * w)
+              bytes.put_f32_le(g_pool, wo, bytes.get_f32_le(g_pool, wo) ?? 0.0 + bytes.get_f32_le(g_pool, so) ?? 0.0 * w)
+              bytes.put_f32_le(g_pool, wo + 4, bytes.get_f32_le(g_pool, wo + 4) ?? 0.0 + bytes.get_f32_le(g_pool, so + 4) ?? 0.0 * w)
+              bytes.put_f32_le(g_pool, wo + 8, bytes.get_f32_le(g_pool, wo + 8) ?? 0.0 + bytes.get_f32_le(g_pool, so + 8) ?? 0.0 * w)
               vi = vi + 1
             }
           } else {}
           ti = ti + 1
         }
         if skinned then skin_blend(dst_off, vc, sid, jw - base) else {}
-        webgl.bind_buffer(webgl.array_buffer(), bytes.read_i32_le(g_prim_meta, po))
+        webgl.bind_buffer(webgl.array_buffer(), bytes.get_i32_le(g_prim_meta, po) ?? 0)
         webgl.buffer_data_f32_ptr(webgl.array_buffer(), work, vc * STRIDE, webgl.dynamic_draw())
         0
       }
@@ -1591,9 +1591,9 @@ pub fn rebuild_prim(pid: Int) -> Int = {
 
 // ── Camera ──
 fn eye_pos(axis: Int) -> Float = {
-  let yaw = bytes.read_f32_le(g_cam, 0)
-  let pitch = bytes.read_f32_le(g_cam, 4)
-  let dist = bytes.read_f32_le(g_cam, 8)
+  let yaw = bytes.get_f32_le(g_cam, 0) ?? 0.0
+  let pitch = bytes.get_f32_le(g_cam, 4) ?? 0.0
+  let dist = bytes.get_f32_le(g_cam, 8) ?? 0.0
   let cp = math.cos(pitch)
   if axis == 0 then dist * cp * math.sin(yaw)
   else if axis == 1 then 1.0 + dist * math.sin(pitch)
@@ -1616,21 +1616,21 @@ fn bind_attribs(pos_loc: Int, norm_loc: Int, col_loc: Int, uv_loc: Int, with_ext
 fn draw_prim_toon(po: Int) -> Unit = {
   let mo = po / PRIM_STRIDE * MTOON_BLOB
   webgl.uniform2f(webgl.get_state(S_T_SHIFT),
-    bytes.read_f32_le(g_prim_mtoon, mo), bytes.read_f32_le(g_prim_mtoon, mo + 4))
+    bytes.get_f32_le(g_prim_mtoon, mo) ?? 0.0, bytes.get_f32_le(g_prim_mtoon, mo + 4) ?? 0.0)
   webgl.uniform3f(webgl.get_state(S_T_EMIS),
-    bytes.read_f32_le(g_prim_mtoon, mo + 8), bytes.read_f32_le(g_prim_mtoon, mo + 12), bytes.read_f32_le(g_prim_mtoon, mo + 16))
+    bytes.get_f32_le(g_prim_mtoon, mo + 8) ?? 0.0, bytes.get_f32_le(g_prim_mtoon, mo + 12) ?? 0.0, bytes.get_f32_le(g_prim_mtoon, mo + 16) ?? 0.0)
   webgl.uniform3f(webgl.get_state(S_T_RIMC),
-    bytes.read_f32_le(g_prim_mtoon, mo + 20), bytes.read_f32_le(g_prim_mtoon, mo + 24), bytes.read_f32_le(g_prim_mtoon, mo + 28))
-  webgl.uniform1f(webgl.get_state(S_T_RIMP), bytes.read_f32_le(g_prim_mtoon, mo + 32))
-  webgl.uniform1f(webgl.get_state(S_T_RIML), bytes.read_f32_le(g_prim_mtoon, mo + 36))
-  let sht = bytes.read_i32_le(g_prim_mtoon, mo + 40)
+    bytes.get_f32_le(g_prim_mtoon, mo + 20) ?? 0.0, bytes.get_f32_le(g_prim_mtoon, mo + 24) ?? 0.0, bytes.get_f32_le(g_prim_mtoon, mo + 28) ?? 0.0)
+  webgl.uniform1f(webgl.get_state(S_T_RIMP), bytes.get_f32_le(g_prim_mtoon, mo + 32) ?? 0.0)
+  webgl.uniform1f(webgl.get_state(S_T_RIML), bytes.get_f32_le(g_prim_mtoon, mo + 36) ?? 0.0)
+  let sht = bytes.get_i32_le(g_prim_mtoon, mo + 40) ?? 0
   if sht > 0 then {
     webgl.active_texture(webgl.texture0() + 1)
     webgl.bind_texture(webgl.texture_2d(), sht)
     webgl.uniform1i(webgl.get_state(S_T_SHTEX), 1)
     webgl.uniform1i(webgl.get_state(S_T_HAS_SHTEX), 1)
   } else { webgl.uniform1i(webgl.get_state(S_T_HAS_SHTEX), 0) }
-  let emt = bytes.read_i32_le(g_prim_mtoon, mo + 44)
+  let emt = bytes.get_i32_le(g_prim_mtoon, mo + 44) ?? 0
   if emt > 0 then {
     webgl.active_texture(webgl.texture0() + 2)
     webgl.bind_texture(webgl.texture_2d(), emt)
@@ -1639,39 +1639,39 @@ fn draw_prim_toon(po: Int) -> Unit = {
   } else { webgl.uniform1i(webgl.get_state(S_T_HAS_EMTEX), 0) }
   webgl.active_texture(webgl.texture0())
   webgl.uniform3f(webgl.get_state(S_T_SHADE),
-    bytes.read_f32_le(g_prim_meta, po + 16),
-    bytes.read_f32_le(g_prim_meta, po + 20),
-    bytes.read_f32_le(g_prim_meta, po + 24))
-  webgl.uniform1i(webgl.get_state(S_T_AMODE), bytes.read_i32_le(g_prim_meta, po + 28))
-  let tex = bytes.read_i32_le(g_prim_meta, po + 12)
+    bytes.get_f32_le(g_prim_meta, po + 16) ?? 0.0,
+    bytes.get_f32_le(g_prim_meta, po + 20) ?? 0.0,
+    bytes.get_f32_le(g_prim_meta, po + 24) ?? 0.0)
+  webgl.uniform1i(webgl.get_state(S_T_AMODE), bytes.get_i32_le(g_prim_meta, po + 28) ?? 0)
+  let tex = bytes.get_i32_le(g_prim_meta, po + 12) ?? 0
   if tex >= 0 then {
     webgl.active_texture(webgl.texture0())
     webgl.bind_texture(webgl.texture_2d(), tex)
     webgl.uniform1i(webgl.get_state(S_T_HASTEX), 1)
   } else { webgl.uniform1i(webgl.get_state(S_T_HASTEX), 0) }
-  webgl.bind_buffer(webgl.array_buffer(), bytes.read_i32_le(g_prim_meta, po))
+  webgl.bind_buffer(webgl.array_buffer(), bytes.get_i32_le(g_prim_meta, po) ?? 0)
   bind_attribs(webgl.get_state(S_T_POS), webgl.get_state(S_T_NORM), webgl.get_state(S_T_COL), webgl.get_state(S_T_UV), true)
-  webgl.bind_buffer(webgl.element_array_buffer(), bytes.read_i32_le(g_prim_meta, po + 4))
-  webgl.draw_elements(webgl.triangles(), bytes.read_i32_le(g_prim_meta, po + 8), webgl.unsigned_short(), 0)
+  webgl.bind_buffer(webgl.element_array_buffer(), bytes.get_i32_le(g_prim_meta, po + 4) ?? 0)
+  webgl.draw_elements(webgl.triangles(), bytes.get_i32_le(g_prim_meta, po + 8) ?? 0, webgl.unsigned_short(), 0)
 }
 
 pub effect fn render_frame(time: Float) -> Unit = {
   // spring-bone tick (dt clamped; first frame only primes last_time)
-  if bytes.read_i32_le(g_spring, 0) > 0 then {
-    let last = bytes.read_f32_le(g_spring, 16)
-    bytes.set_f32_le(g_spring, 16, time)
+  if bytes.get_i32_le(g_spring, 0) ?? 0 > 0 then {
+    let last = bytes.get_f32_le(g_spring, 16) ?? 0.0
+    bytes.put_f32_le(g_spring, 16, time)
     if last > 0.0 and time > last then {
       let _ = spring_tick(float.min(time - last, 0.033))
     } else {}
   } else {}
-  webgl.clear_color(bytes.read_f32_le(g_view, 12), bytes.read_f32_le(g_view, 16), bytes.read_f32_le(g_view, 20), 1.0)
+  webgl.clear_color(bytes.get_f32_le(g_view, 12) ?? 0.0, bytes.get_f32_le(g_view, 16) ?? 0.0, bytes.get_f32_le(g_view, 20) ?? 0.0, 1.0)
   webgl.clear(webgl.color_buffer_bit() + webgl.depth_buffer_bit())
-  let n = bytes.read_i32_le(g_n_prims, 0)
+  let n = bytes.get_i32_le(g_n_prims, 0) ?? 0
   let ex = eye_pos(0)
   let ey = eye_pos(1)
   let ez = eye_pos(2)
   let view = mat.look_at(ex, ey, ez, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0)
-  let proj = mat.perspective(0.8, bytes.read_f32_le(g_aspect, 0), 0.05, 100.0)
+  let proj = mat.perspective(0.8, bytes.get_f32_le(g_aspect, 0) ?? 0.0, 0.05, 100.0)
   let mvp = mat.multiply(proj, view)
   let model = mat.identity()
 
@@ -1687,28 +1687,28 @@ pub effect fn render_frame(time: Float) -> Unit = {
   var i = 0
   while i < n {
     let po = i * PRIM_STRIDE
-    let ow = bytes.read_f32_le(g_prim_meta, po + 32)
-    if ow > 0.0 and bytes.read_i32_le(g_prim_meta, po + 28) != 2 then {
+    let ow = bytes.get_f32_le(g_prim_meta, po + 32) ?? 0.0
+    if ow > 0.0 and (bytes.get_i32_le(g_prim_meta, po + 28) ?? 0) != 2 then {
       webgl.uniform1f(webgl.get_state(S_O_WIDTH), ow)
       webgl.uniform3f(webgl.get_state(S_O_COLOR),
-        bytes.read_f32_le(g_prim_meta, po + 36),
-        bytes.read_f32_le(g_prim_meta, po + 40),
-        bytes.read_f32_le(g_prim_meta, po + 44))
-      webgl.bind_buffer(webgl.array_buffer(), bytes.read_i32_le(g_prim_meta, po))
+        bytes.get_f32_le(g_prim_meta, po + 36) ?? 0.0,
+        bytes.get_f32_le(g_prim_meta, po + 40) ?? 0.0,
+        bytes.get_f32_le(g_prim_meta, po + 44) ?? 0.0)
+      webgl.bind_buffer(webgl.array_buffer(), bytes.get_i32_le(g_prim_meta, po) ?? 0)
       webgl.vertex_attrib_pointer(webgl.get_state(S_O_POS), 3, webgl.gl_float(), 0, STRIDE, 0)
       webgl.enable_vertex_attrib_array(webgl.get_state(S_O_POS))
       webgl.vertex_attrib_pointer(webgl.get_state(S_O_NORM), 3, webgl.gl_float(), 0, STRIDE, 12)
       webgl.enable_vertex_attrib_array(webgl.get_state(S_O_NORM))
       webgl.vertex_attrib_pointer(webgl.get_state(S_O_UV), 2, webgl.gl_float(), 0, STRIDE, 36)
       webgl.enable_vertex_attrib_array(webgl.get_state(S_O_UV))
-      let tex = bytes.read_i32_le(g_prim_meta, po + 12)
+      let tex = bytes.get_i32_le(g_prim_meta, po + 12) ?? 0
       if tex >= 0 then {
         webgl.active_texture(webgl.texture0())
         webgl.bind_texture(webgl.texture_2d(), tex)
         webgl.uniform1i(webgl.get_state(S_O_HASTEX), 1)
       } else { webgl.uniform1i(webgl.get_state(S_O_HASTEX), 0) }
-      webgl.bind_buffer(webgl.element_array_buffer(), bytes.read_i32_le(g_prim_meta, po + 4))
-      webgl.draw_elements(webgl.triangles(), bytes.read_i32_le(g_prim_meta, po + 8), webgl.unsigned_short(), 0)
+      webgl.bind_buffer(webgl.element_array_buffer(), bytes.get_i32_le(g_prim_meta, po + 4) ?? 0)
+      webgl.draw_elements(webgl.triangles(), bytes.get_i32_le(g_prim_meta, po + 8) ?? 0, webgl.unsigned_short(), 0)
     } else {}
     i = i + 1
   }
@@ -1721,7 +1721,7 @@ pub effect fn render_frame(time: Float) -> Unit = {
   webgl.uniform_matrix4fv(webgl.get_state(S_T_MODEL), model)
   webgl.uniform3f(webgl.get_state(S_T_EYE), ex, ey, ez)
   webgl.uniform3f(webgl.get_state(S_T_SUN),
-    bytes.read_f32_le(g_view, 0), bytes.read_f32_le(g_view, 4), bytes.read_f32_le(g_view, 8))
+    bytes.get_f32_le(g_view, 0) ?? 0.0, bytes.get_f32_le(g_view, 4) ?? 0.0, bytes.get_f32_le(g_view, 8) ?? 0.0)
   webgl.uniform3f(webgl.get_state(S_T_LIGHT), 1.0, 0.97, 0.92)
   webgl.uniform1f(webgl.get_state(S_T_THRESH), 0.55)
   webgl.uniform1f(webgl.get_state(S_T_FEATHER), 0.03)
@@ -1730,7 +1730,7 @@ pub effect fn render_frame(time: Float) -> Unit = {
   var k = 0
   while k < n {
     let po = k * PRIM_STRIDE
-    if bytes.read_i32_le(g_prim_meta, po + 28) != 2 then draw_prim_toon(po) else {}
+    if (bytes.get_i32_le(g_prim_meta, po + 28) ?? 0) != 2 then draw_prim_toon(po) else {}
     k = k + 1
   }
   // Blend decals last (face mouth/eyes/blush), with alpha blending.
@@ -1739,7 +1739,7 @@ pub effect fn render_frame(time: Float) -> Unit = {
   var kb = 0
   while kb < n {
     let po = kb * PRIM_STRIDE
-    if bytes.read_i32_le(g_prim_meta, po + 28) == 2 then draw_prim_toon(po) else {}
+    if bytes.get_i32_le(g_prim_meta, po + 28) ?? 0 == 2 then draw_prim_toon(po) else {}
     kb = kb + 1
   }
   webgl.disable(webgl.blend())
@@ -1747,23 +1747,23 @@ pub effect fn render_frame(time: Float) -> Unit = {
 
 // ── Input (orbit) ──
 pub effect fn on_pointer_down(x: Float, y: Float, button: Int) -> Unit = {
-  bytes.set_f32_le(g_ptr, 0, x)
-  bytes.set_f32_le(g_ptr, 4, y)
-  bytes.set_i32_le(g_ptr, 8, 1)
+  bytes.put_f32_le(g_ptr, 0, x)
+  bytes.put_f32_le(g_ptr, 4, y)
+  bytes.put_i32_le(g_ptr, 8, 1)
 }
 pub effect fn on_pointer_up(x: Float, y: Float, button: Int) -> Unit = {
-  bytes.set_i32_le(g_ptr, 8, 0)
+  bytes.put_i32_le(g_ptr, 8, 0)
 }
 pub effect fn on_pointer_move(x: Float, y: Float) -> Unit = {
-  if bytes.read_i32_le(g_ptr, 8) == 1 then {
-    let dx = x - bytes.read_f32_le(g_ptr, 0)
-    let dy = y - bytes.read_f32_le(g_ptr, 4)
-    bytes.set_f32_le(g_cam, 0, bytes.read_f32_le(g_cam, 0) - dx * 0.01)
-    bytes.set_f32_le(g_cam, 4, float.clamp(bytes.read_f32_le(g_cam, 4) + dy * 0.01, -1.4, 1.4))
-    bytes.set_f32_le(g_ptr, 0, x)
-    bytes.set_f32_le(g_ptr, 4, y)
+  if bytes.get_i32_le(g_ptr, 8) ?? 0 == 1 then {
+    let dx = x - bytes.get_f32_le(g_ptr, 0) ?? 0.0
+    let dy = y - bytes.get_f32_le(g_ptr, 4) ?? 0.0
+    bytes.put_f32_le(g_cam, 0, bytes.get_f32_le(g_cam, 0) ?? 0.0 - dx * 0.01)
+    bytes.put_f32_le(g_cam, 4, float.clamp(bytes.get_f32_le(g_cam, 4) ?? 0.0 + dy * 0.01, -1.4, 1.4))
+    bytes.put_f32_le(g_ptr, 0, x)
+    bytes.put_f32_le(g_ptr, 4, y)
   } else {}
 }
 pub effect fn on_wheel(delta: Float) -> Unit = {
-  bytes.set_f32_le(g_cam, 8, float.clamp(bytes.read_f32_le(g_cam, 8) + delta * 0.003, 0.4, 20.0))
+  bytes.put_f32_le(g_cam, 8, float.clamp(bytes.get_f32_le(g_cam, 8) ?? 0.0 + delta * 0.003, 0.4, 20.0))
 }

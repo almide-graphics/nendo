@@ -17,17 +17,17 @@ type AccessorInfo = {
 
 // Resolve accessor info from glTF JSON. Returns none if invalid.
 fn resolve(gltf_json: json.Value, accessor_idx: Int) -> Option[AccessorInfo] = {
-  let accessors = option.unwrap_or(json.get_array(gltf_json, "accessors"), [])
-  let buffer_views = option.unwrap_or(json.get_array(gltf_json, "bufferViews"), [])
+  let accessors = option.unwrap_or(value.get_array(gltf_json, "accessors"), [])
+  let buffer_views = option.unwrap_or(value.get_array(gltf_json, "bufferViews"), [])
 
   match list.get(accessors, accessor_idx) {
     none => none,
     some(acc) => {
-      let count = option.unwrap_or(json.get_int(acc, "count"), 0)
-      let acc_type = option.unwrap_or(json.get_string(acc, "type"), "")
-      let comp_type = option.unwrap_or(json.get_int(acc, "componentType"), 5126)
-      let bv_idx = option.unwrap_or(json.get_int(acc, "bufferView"), 0)
-      let acc_offset = option.unwrap_or(json.get_int(acc, "byteOffset"), 0)
+      let count = option.unwrap_or(value.get_int(acc, "count"), 0)
+      let acc_type = option.unwrap_or(value.get_string(acc, "type"), "")
+      let comp_type = option.unwrap_or(value.get_int(acc, "componentType"), 5126)
+      let bv_idx = option.unwrap_or(value.get_int(acc, "bufferView"), 0)
+      let acc_offset = option.unwrap_or(value.get_int(acc, "byteOffset"), 0)
 
       let components = match acc_type {
         "SCALAR" => 1, "VEC2" => 2, "VEC3" => 3, "VEC4" => 4, "MAT4" => 16, _ => 1,
@@ -40,8 +40,8 @@ fn resolve(gltf_json: json.Value, accessor_idx: Int) -> Option[AccessorInfo] = {
       match list.get(buffer_views, bv_idx) {
         none => none,
         some(bv) => {
-          let bv_offset = option.unwrap_or(json.get_int(bv, "byteOffset"), 0)
-          let bv_stride = option.unwrap_or(json.get_int(bv, "byteStride"), 0)
+          let bv_offset = option.unwrap_or(value.get_int(bv, "byteOffset"), 0)
+          let bv_stride = option.unwrap_or(value.get_int(bv, "byteStride"), 0)
           // If stride is 0, use tight packing: components * comp_size
           let effective_stride = if bv_stride > 0 then bv_stride else components * comp_size
           some(AccessorInfo {
@@ -60,7 +60,7 @@ fn resolve(gltf_json: json.Value, accessor_idx: Int) -> Option[AccessorInfo] = {
 // Slice float32 data directly from GLB binary. Zero-copy — returns a view.
 fn slice_f32(gltf_json: json.Value, bin: Bytes, accessor_idx: Int) -> Bytes = {
   match resolve(gltf_json, accessor_idx) {
-    none => bytes.new(0),
+    none => bytes.zeros(0),
     some(info) => {
       let byte_len = info.count * info.components * 4
       bytes.slice(bin, info.base_offset, info.base_offset + byte_len)
@@ -71,7 +71,7 @@ fn slice_f32(gltf_json: json.Value, bin: Bytes, accessor_idx: Int) -> Bytes = {
 // Slice uint16 index data directly from GLB binary.
 fn slice_u16(gltf_json: json.Value, bin: Bytes, accessor_idx: Int) -> Bytes = {
   match resolve(gltf_json, accessor_idx) {
-    none => bytes.new(0),
+    none => bytes.zeros(0),
     some(info) => {
       let byte_len = info.count * 2
       bytes.slice(bin, info.base_offset, info.base_offset + byte_len)
@@ -87,5 +87,5 @@ fn element_count(gltf_json: json.Value, accessor_idx: Int) -> Int =
   }
 
 test "resolve on empty returns none" {
-  assert(option.is_none(resolve(json.null(), 0)))
+  assert(option.is_none(resolve(value.null(), 0)))
 }

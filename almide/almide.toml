@@ -1,8 +1,13 @@
 [package]
 name = "nendo"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2026"
 
 [dependencies]
 lumen = { git = "https://github.com/almide-graphics/lumen.git" }
 obsid = { git = "https://github.com/almide-graphics/obsid.git" }
+
+# Dialect epoch 15 (#4093): a git dependency outside github.com/almide is fetched only
+# from an owner the root manifest trusts.
+[trust]
+owners = ["github.com/almide-graphics"]
