@@ -340,6 +340,9 @@ pub effect fn rebuild_prim(prim_idx: Int) -> Unit = {
     else {
       let base_off = bytes.get_i32_le(g_prim_meta, po + 20) ?? 0
 
+      // `work` (and the rest of this call's allocations) is reclaimed by the runtime;
+      // the explicit bytes.heap_save/heap_restore checkpoint around it was removed in
+      // dialect epoch 15 (R-bytes-14), which drops them with no replacement.
       // Copy base → working buffer
       let work = bytes.zeros(vc * 44)
       bytes.copy_from(work, g_morph_data, 0, base_off, vc * 44)
