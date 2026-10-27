@@ -4,6 +4,7 @@
 module render
 
 import json
+import ffi
 import bytes
 import obsid
 import mesh
@@ -26,8 +27,8 @@ pub effect fn load_from_glb(g: GlbData) -> Result[Int, String] = {
       ok(md) => {
         obsid.create_mesh(mesh_id)
         obsid.upload_mesh(mesh_id,
-          bytes.data_ptr(md.vertices), md.vert_count,
-          bytes.data_ptr(md.indices), md.idx_count)
+          ffi.to_int(ffi.address(md.vertices)), md.vert_count,
+          ffi.to_int(ffi.address(md.indices)), md.idx_count)
       },
       err(_) => {},
     }

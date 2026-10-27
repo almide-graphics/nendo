@@ -17,6 +17,7 @@
 // a plain `fn` (an exported `effect fn` returns a Result-wrapped value that JS
 // reads as garbage and can trap).
 import obsid.webgl as webgl
+import ffi
 import lumen.mat4 as mat
 import math
 import json
@@ -115,7 +116,7 @@ fn m4_mul(d: Int, a: Int, b: Int) -> Unit = {
 
 // compose node-local matrix (T+off) * R(quat) * (S*scale) into pool offset d
 fn compose_local(d: Int, slot: Int) -> Unit = {
-  let base = bytes.data_ptr(g_pool)
+  let base = ffi.to_int(ffi.address(g_pool))
   let nb = bytes.get_i32_le(g_skel, 4) ?? 0 - base + slot * NODE_BLOB
   let tx = bytes.get_f32_le(g_pool, nb + 4) ?? 0.0 + bytes.get_f32_le(g_node_off, slot * 12) ?? 0.0
   let ty = bytes.get_f32_le(g_pool, nb + 8) ?? 0.0 + bytes.get_f32_le(g_node_off, slot * 12 + 4) ?? 0.0
@@ -572,14 +573,14 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
         let bo = option.unwrap_or(value.get_int(bv, "byteOffset"), 0)
         let bl = option.unwrap_or(value.get_int(bv, "byteLength"), 0)
         let tex = webgl.create_texture()
-        webgl.tex_image_2d_encoded(tex, bytes.data_ptr(data) + bin_off + bo, bl)
+        webgl.tex_image_2d_encoded(tex, ffi.to_int(ffi.address(data)) + bin_off + bo, bl)
         bytes.put_i32_le(g_img_tex, ii * 4, tex)
       } else {}
       ii = ii + 1
     }
 
     // ── Skeleton (topo order) + skins — parsed entirely in Almide ──
-    let base2 = bytes.data_ptr(g_pool)
+    let base2 = ffi.to_int(ffi.address(g_pool))
     let n_nodes = arr_len(gltf, "nodes")
     var sm0 = 0
     while sm0 < MAX_NODES { bytes.put_i32_le(g_slotmap, sm0 * 4, 0 - 1); sm0 = sm0 + 1 }
@@ -791,10 +792,10 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
           if vp != 0 then { bytes.copy_from(g_pool, verts, vp - base2, 0, vc * STRIDE) } else {}
           let vbo = webgl.create_buffer()
           webgl.bind_buffer(webgl.array_buffer(), vbo)
-          webgl.buffer_data_f32_ptr(webgl.array_buffer(), bytes.data_ptr(verts), vc * STRIDE, webgl.static_draw())
+          webgl.buffer_data_f32_ptr(webgl.array_buffer(), ffi.to_int(ffi.address(verts)), vc * STRIDE, webgl.static_draw())
           let ibo = webgl.create_buffer()
           webgl.bind_buffer(webgl.element_array_buffer(), ibo)
-          webgl.buffer_data_u16_ptr(webgl.element_array_buffer(), bytes.data_ptr(idxb), ic * 2, webgl.static_draw())
+          webgl.buffer_data_u16_ptr(webgl.element_array_buffer(), ffi.to_int(ffi.address(idxb)), ic * 2, webgl.static_draw())
 
           let mat_i = option.unwrap_or(value.get_int(prim, "material"), -1)
           var tex_handle = -1
@@ -1147,7 +1148,7 @@ pub fn recompute_world() -> Int = {
   let n = bytes.get_i32_le(g_skel, 0) ?? 0
   if n == 0 then 0
   else {
-    let base = bytes.data_ptr(g_pool)
+    let base = ffi.to_int(ffi.address(g_pool))
     let nodes = bytes.get_i32_le(g_skel, 4) ?? 0 - base
     let world = bytes.get_i32_le(g_skel, 8) ?? 0 - base
     let tmp = bytes.get_i32_le(g_skel, 12) ?? 0 - base
@@ -1210,7 +1211,7 @@ pub fn spring_tick(dt: Float) -> Int = {
   let nj = bytes.get_i32_le(g_spring, 0) ?? 0
   if nj == 0 or dt <= 0.0 then 0
   else {
-    let base = bytes.data_ptr(g_pool)
+    let base = ffi.to_int(ffi.address(g_pool))
     let jblob = bytes.get_i32_le(g_spring, 4) ?? 0 - base
     let ncol = bytes.get_i32_le(g_spring, 8) ?? 0
     let cblob = bytes.get_i32_le(g_spring, 12) ?? 0 - base
@@ -1450,7 +1451,7 @@ pub fn add_prim(vptr: Int, vcount: Int, iptr: Int, icount: Int,
 
 // ── Pool + morph API (host writes data, Almide owns the blend math) ──
 
-pub fn pool_ptr() -> Int = bytes.data_ptr(g_pool)
+pub fn pool_ptr() -> Int = ffi.to_int(ffi.address(g_pool))
 
 // Bump-allocate n bytes (4-aligned) inside g_pool; returns ABSOLUTE address.
 // 0 = pool exhausted.
@@ -1460,7 +1461,7 @@ pub fn pool_alloc(n: Int) -> Int = {
   if used + aligned > POOL_SIZE then 0
   else {
     bytes.put_i32_le(g_pool_used, 0, used + aligned)
-    bytes.data_ptr(g_pool) + used
+    ffi.to_int(ffi.address(g_pool)) + used
   }
 }
 
@@ -1497,7 +1498,7 @@ pub fn set_morph_weight(pid: Int, ti: Int, w: Float) -> Int = {
 // Skin-blend positions+normals of `vc` vertices in-place at work_off.
 // jw blob: per vertex [u16 x4 joint indices][f32 x4 weights] = 24B.
 fn skin_blend(work_off: Int, vc: Int, sid: Int, jw_off: Int) -> Unit = {
-  let pal = bytes.get_i32_le(g_skins, sid * 16 + 12) ?? 0 - bytes.data_ptr(g_pool)
+  let pal = bytes.get_i32_le(g_skins, sid * 16 + 12) ?? 0 - ffi.to_int(ffi.address(g_pool))
   var vi = 0
   while vi < vc {
     let wo = work_off + vi * STRIDE
@@ -1558,7 +1559,7 @@ pub fn rebuild_prim(pid: Int) -> Int = {
       } else {}
       if work == 0 then 0
       else {
-        let base = bytes.data_ptr(g_pool)
+        let base = ffi.to_int(ffi.address(g_pool))
         let src_off = vptr - base
         let dst_off = work - base
         bytes.copy_from(g_pool, g_pool, dst_off, src_off, vc * STRIDE)

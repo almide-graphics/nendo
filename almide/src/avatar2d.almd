@@ -3,6 +3,7 @@
 // SHADER (zero per-frame buffer uploads). Almide owns the animation brain:
 // auto-blink envelope, breathing, cursor-follow spring, lagged hair spring.
 import obsid.webgl as webgl
+import ffi
 import math
 
 let GRID_W = 48
@@ -220,7 +221,7 @@ effect fn main() -> Unit = {
 
   // grid mesh (uv only)
   let nv = (GRID_W + 1) * (GRID_H + 1)
-  let verts = bytes.zeros(nv * 8)
+  var verts = bytes.zeros(nv * 8)
   var gy = 0
   while gy <= GRID_H {
     var gx = 0
@@ -232,7 +233,7 @@ effect fn main() -> Unit = {
     }
     gy = gy + 1
   }
-  let idx = bytes.zeros(GRID_W * GRID_H * 12)
+  var idx = bytes.zeros(GRID_W * GRID_H * 12)
   var qy = 0
   var k = 0
   while qy < GRID_H {
@@ -255,10 +256,10 @@ effect fn main() -> Unit = {
   }
   let vbo = webgl.create_buffer()
   webgl.bind_buffer(webgl.array_buffer(), vbo)
-  webgl.buffer_data_f32_ptr(webgl.array_buffer(), bytes.data_ptr(verts), nv * 8, webgl.static_draw())
+  webgl.buffer_data_f32_ptr(webgl.array_buffer(), ffi.to_int(ffi.address(verts)), nv * 8, webgl.static_draw())
   let ibo = webgl.create_buffer()
   webgl.bind_buffer(webgl.element_array_buffer(), ibo)
-  webgl.buffer_data_u16_ptr(webgl.element_array_buffer(), bytes.data_ptr(idx), GRID_W * GRID_H * 12, webgl.static_draw())
+  webgl.buffer_data_u16_ptr(webgl.element_array_buffer(), ffi.to_int(ffi.address(idx)), GRID_W * GRID_H * 12, webgl.static_draw())
   bytes.put_i32_le(g_state, 4, vbo)
   bytes.put_i32_le(g_state, 8, ibo)
   bytes.put_f32_le(g_anim, 4, 1.5)

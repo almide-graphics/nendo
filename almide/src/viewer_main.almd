@@ -2,6 +2,7 @@
 // Global state stored in top-level let Bytes (works in WASM target).
 
 import obsid
+import ffi
 import bytes
 import json
 import mesh
@@ -39,7 +40,7 @@ effect fn main() -> Unit = {
   // Register MToon shader
   let frag = "precision highp float; varying vec3 v_norm, v_color; varying highp vec3 v_wpos; varying vec2 v_uv; varying highp float v_dist; uniform highp vec3 u_eye; uniform vec3 u_sun_color, u_sun_dir, u_ambient, u_fog_color; uniform vec2 u_fog_range; uniform float u_alpha; uniform vec3 u_shade_color; uniform float u_shade_threshold; uniform sampler2D u_tex; uniform int u_has_tex; vec3 srgbToLinear(vec3 c) { return pow(c, vec3(2.2)); } vec3 linearToSrgb(vec3 c) { return pow(c, vec3(1.0/2.2)); } void main() { vec3 n = normalize(v_norm); vec3 baseColor = srgbToLinear(v_color); if (u_has_tex == 1) { baseColor *= srgbToLinear(texture2D(u_tex, v_uv).rgb); } vec3 sunDir = normalize(u_sun_dir); float NdotL = max(dot(n, sunDir), 0.0); float toon = smoothstep(u_shade_threshold - 0.08, u_shade_threshold + 0.08, NdotL); vec3 litColor = srgbToLinear(u_ambient) + srgbToLinear(u_sun_color); vec3 shadColor = srgbToLinear(u_shade_color); vec3 lighting = mix(shadColor, litColor, toon); vec3 viewDir = normalize(u_eye - v_wpos); float rim = 1.0 - max(dot(n, viewDir), 0.0); rim = smoothstep(0.6, 1.0, rim) * 0.15; vec3 color = baseColor * lighting + vec3(rim); float fog = clamp((u_fog_range.y - v_dist) / (u_fog_range.y - u_fog_range.x), 0.0, 1.0); color = mix(srgbToLinear(u_fog_color), color, fog); gl_FragColor = vec4(linearToSrgb(color), u_alpha); }"
   let fb = bytes.from_string(frag)
-  obsid.create_shader_program(1, bytes.data_ptr(fb), bytes.len(fb))
+  obsid.create_shader_program(1, ffi.to_int(ffi.address(fb)), bytes.len(fb))
 }
 
 // ── Load VRM ──
@@ -97,7 +98,7 @@ pub effect fn load_vrm_data(data: Bytes) -> Int = {
             some(bv) => {
               let bv_off = option.unwrap_or(value.get_int(bv, "byteOffset"), 0)
               let bv_len = option.unwrap_or(value.get_int(bv, "byteLength"), 0)
-              obsid.upload_texture_raw(img_id, bytes.data_ptr(data) + bin_off + bv_off, bv_len)
+              obsid.upload_texture_raw(img_id, ffi.to_int(ffi.address(data)) + bin_off + bv_off, bv_len)
             },
             none => {},
           }
@@ -162,7 +163,7 @@ pub effect fn load_vrm_data(data: Bytes) -> Int = {
               } else {}
 
               obsid.create_mesh(obsid_id)
-              obsid.upload_mesh(obsid_id, bytes.data_ptr(m.vertices), m.vert_count, bytes.data_ptr(m.indices), m.idx_count)
+              obsid.upload_mesh(obsid_id, ffi.to_int(ffi.address(m.vertices)), m.vert_count, ffi.to_int(ffi.address(m.indices)), m.idx_count)
 
               // Bind texture + toon
               let mat_i = option.unwrap_or(value.get_int(prim, "material"), -1)
@@ -373,7 +374,7 @@ pub effect fn rebuild_prim(prim_idx: Int) -> Unit = {
       }
 
       // Re-upload vertices only (indices unchanged)
-      obsid.update_mesh_verts(oid, bytes.data_ptr(work), vc)
+      obsid.update_mesh_verts(oid, ffi.to_int(ffi.address(work)), vc)
     }
   } else {}
 }
