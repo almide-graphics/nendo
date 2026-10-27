@@ -1,5 +1,5 @@
 // VRM viewer with dynamic morph target control.
-// Global state stored in top-level let Bytes (works in WASM target).
+// Global state stored in top-level var Bytes (works in WASM target).
 
 import obsid
 import ffi
@@ -12,29 +12,29 @@ import skin
 // ── Global state (mutable Bytes as pseudo-globals) ──
 // Persists across load/render/set_morph calls.
 
-let g_bin_off = bytes.zeros(4)       // i32: binary chunk offset
-let g_n_prims = bytes.zeros(4)       // i32: total obsid primitives loaded
+var g_bin_off = bytes.zeros(4)       // i32: binary chunk offset
+var g_n_prims = bytes.zeros(4)       // i32: total obsid primitives loaded
 
 // Per-primitive state: flat array, 20 bytes each:
 //   [obsid_id:i32][vert_count:i32][morph_count:i32][base_verts_ptr:i32][prim_json_ptr:i32]
 let PRIM_STRIDE = 24
 let MAX_PRIMS = 512
-let g_prim_meta = bytes.zeros(12288) // 512 * 24
+var g_prim_meta = bytes.zeros(12288) // 512 * 24
 
 // Morph weights: per-prim * per-target float32
 let MAX_MORPHS_PER_PRIM = 64
-let g_morph_weights = bytes.zeros(131072)  // 512 * 64 * 4
+var g_morph_weights = bytes.zeros(131072)  // 512 * 64 * 4
 // Morph deltas: all delta data in one flat buffer.
 // Offset for (prim, target) stored in g_morph_delta_off as i32 byte offset.
 // -1 = not available. Delta data is 12 bytes (vec3 f32) per vertex.
-let g_morph_delta_off = bytes.zeros(131072) // 512 * 64 * 4 (offset table)
-let g_morph_data = bytes.zeros(16777216)    // 16MB max for base verts + delta data
-let g_morph_data_pos = bytes.zeros(4)       // i32: current write position in g_morph_data
+var g_morph_delta_off = bytes.zeros(131072) // 512 * 64 * 4 (offset table)
+var g_morph_data = bytes.zeros(16777216)    // 16MB max for base verts + delta data
+var g_morph_data_pos = bytes.zeros(4)       // i32: current write position in g_morph_data
 
 // ── Init ──
 
 effect fn main() -> Unit = {
-  obsid.orbit_init(0.0, 0.85, 0.0, 0.0, 0.2, 2.5, 0.3, 20.0)
+  obsid.orbit_init(0.0, 0.85, 0.0, 0.0, 0.2, 2.5, 0.3, 20.0)!
   obsid.set_dir_light(0.6, 0.6, 0.62, 0.1, -0.7, -0.7)
   obsid.set_ambient(0.75, 0.75, 0.78)
   // Register MToon shader
@@ -113,7 +113,7 @@ pub effect fn load_vrm_data(data: Bytes) -> Int = {
         let sk = list.get(skins_arr, 0) ?? value.null()
         list.len(option.unwrap_or(value.get_array(sk, "joints"), []))
       } else 0
-      let joint_mats = bytes.zeros(n_joints * 64)
+      var joint_mats = bytes.zeros(n_joints * 64)
       if n_joints > 0 then {
         let tmp = skin.compute_joint_matrices(gltf, data, bin_off, 0)
         bytes.copy_from(joint_mats, tmp, 0, 0, int.min(bytes.len(tmp), n_joints * 64))
@@ -138,14 +138,15 @@ pub effect fn load_vrm_data(data: Bytes) -> Int = {
           let vert_count = if pos_idx >= 0 then accessor.element_count(gltf, pos_idx) else 0
 
           // Allocate persistent base vertex buffer (survives arena restore)
-          let base_verts = if vert_count > 0 then bytes.zeros(vert_count * 44) else bytes.zeros(0)
+          var base_verts = if vert_count > 0 then bytes.zeros(vert_count * 44) else bytes.zeros(0)
 
           match mesh.build_primitive(gltf, data, bin_off, prim) {
             some(m) => {
               // Copy built vertices to persistent base (before skinning/morph)
               bytes.copy_from(base_verts, m.vertices, 0, 0, m.vert_count * 44)
 
-              // Apply CPU skinning
+              // Apply CPU skinning (in place on a var copy of the built vertices)
+              var verts = m.vertices
               if has_skin then {
                 let j_idx = option.unwrap_or(value.get_int(attrs, "JOINTS_0"), -1)
                 let w_idx = option.unwrap_or(value.get_int(attrs, "WEIGHTS_0"), -1)
@@ -153,7 +154,7 @@ pub effect fn load_vrm_data(data: Bytes) -> Int = {
                   match accessor.resolve(gltf, j_idx) {
                     some(ji) => match accessor.resolve(gltf, w_idx) {
                       some(wi) => {
-                        skin.apply_skinning(m.vertices, m.vert_count, 44, joint_mats, data, bin_off, ji, wi)
+                        skin.apply_skinning(verts, m.vert_count, 44, joint_mats, data, bin_off, ji, wi)
                       },
                       none => {},
                     },
@@ -163,7 +164,7 @@ pub effect fn load_vrm_data(data: Bytes) -> Int = {
               } else {}
 
               obsid.create_mesh(obsid_id)
-              obsid.upload_mesh(obsid_id, ffi.to_int(ffi.address(m.vertices)), m.vert_count, ffi.to_int(ffi.address(m.indices)), m.idx_count)
+              obsid.upload_mesh(obsid_id, ffi.to_int(ffi.address(verts)), m.vert_count, ffi.to_int(ffi.address(m.indices)), m.idx_count)
 
               // Bind texture + toon
               let mat_i = option.unwrap_or(value.get_int(prim, "material"), -1)
@@ -345,7 +346,7 @@ pub effect fn rebuild_prim(prim_idx: Int) -> Unit = {
       // the explicit bytes.heap_save/heap_restore checkpoint around it was removed in
       // dialect epoch 15 (R-bytes-14), which drops them with no replacement.
       // Copy base → working buffer
-      let work = bytes.zeros(vc * 44)
+      var work = bytes.zeros(vc * 44)
       bytes.copy_from(work, g_morph_data, 0, base_off, vc * 44)
 
       // Apply morph deltas
@@ -383,18 +384,18 @@ pub effect fn rebuild_prim(prim_idx: Int) -> Unit = {
 
 pub effect fn render_frame(t: Float) -> Unit = {
   let aspect = obsid.get_aspect()
-  obsid.orbit_apply(45.0, aspect, 0.01, 100.0)
+  obsid.orbit_apply(45.0, aspect, 0.01, 100.0)!
   obsid.render()
 }
 
 pub effect fn on_pointer_down(x: Float, y: Float, button: Int) -> Unit =
-  obsid.orbit_on_pointer_down(x, y)
+  obsid.orbit_on_pointer_down(x, y)!
 
 pub effect fn on_pointer_up(x: Float, y: Float, button: Int) -> Unit =
-  obsid.orbit_on_pointer_up()
+  obsid.orbit_on_pointer_up()!
 
 pub effect fn on_pointer_move(x: Float, y: Float) -> Unit =
-  obsid.orbit_on_pointer_move(x, y)
+  obsid.orbit_on_pointer_move(x, y)!
 
 pub effect fn on_wheel(delta: Float) -> Unit =
-  obsid.orbit_on_wheel(delta)
+  obsid.orbit_on_wheel(delta)!

@@ -20,7 +20,7 @@ type MeshData = {
 // Apply morph targets to vertex buffer in-place.
 // prim: the primitive JSON (has "targets" array)
 // weights: Bytes of morph_count × float32 LE
-fn apply_morph(gltf_json: json.Value, bin: Bytes, bin_offset: Int, prim: json.Value, verts: Bytes, vert_count: Int, out_stride: Int, weights: Bytes) -> Unit = {
+fn apply_morph(gltf_json: json.Value, bin: Bytes, bin_offset: Int, prim: json.Value, mut verts: Bytes, vert_count: Int, out_stride: Int, weights: Bytes) -> Unit = {
   let targets = option.unwrap_or(value.get_array(prim, "targets"), [])
   var ti = 0
   while ti < list.len(targets) {
@@ -94,7 +94,7 @@ fn build_primitive(gltf_json: json.Value, bin: Bytes, bin_offset: Int, prim: jso
   let base_b = get_color_component(gltf_json, mat_idx, 2)
 
   let out_stride = 44
-  let verts = bytes.zeros(vert_count * out_stride)
+  var verts = bytes.zeros(vert_count * out_stride)
   var i = 0
   while i < vert_count {
     let dst = i * out_stride
@@ -125,7 +125,7 @@ fn build_primitive(gltf_json: json.Value, bin: Bytes, bin_offset: Int, prim: jso
   let idx_acc = option.unwrap_or(value.get_int(prim, "indices"), -1)
   let idx_info = if idx_acc >= 0 then accessor.resolve(gltf_json, idx_acc) else none
   let idx_count = match idx_info { some(ii) => ii.count, none => 0 }
-  let idx_data = bytes.zeros(idx_count * 2)
+  var idx_data = bytes.zeros(idx_count * 2)
   match idx_info {
     some(ii) => {
       if ii.comp_size == 2 then {
@@ -147,6 +147,16 @@ fn build_primitive(gltf_json: json.Value, bin: Bytes, bin_offset: Int, prim: jso
   }
   }
 }
+
+// Build the first primitive of a mesh; `bin` is the GLB binary chunk itself (offset 0).
+fn from_gltf(gltf_json: json.Value, bin: Bytes, mesh_idx: Int) -> Result[MeshData, String] =
+  match list.get(get_primitives(gltf_json, mesh_idx), 0) {
+    none => err("no primitives in mesh ${int.to_string(mesh_idx)}"),
+    some(prim) => match build_primitive(gltf_json, bin, 0, prim) {
+      some(md) => ok(md),
+      none => err("primitive has no POSITION accessor"),
+    },
+  }
 
 fn get_color_component(gltf_json: json.Value, mat_idx: Int, idx: Int) -> Float = {
   if mat_idx < 0 then 0.8

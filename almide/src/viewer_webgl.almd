@@ -436,11 +436,11 @@ effect fn main() -> Unit = {
   let _ = set_bg(0.08, 0.085, 0.11)
   let _ = set_spring_tune(0.0, 1.0)
 
-  render_frame(0.0)
-  on_pointer_down(0.0, 0.0, 0)
-  on_pointer_up(0.0, 0.0, 0)
-  on_pointer_move(0.0, 0.0)
-  on_wheel(0.0)
+  render_frame(0.0)!
+  on_pointer_down(0.0, 0.0, 0)!
+  on_pointer_up(0.0, 0.0, 0)!
+  on_pointer_move(0.0, 0.0)!
+  on_wheel(0.0)!
   let _ = load_vrm_data(bytes.zeros(0))
   let _ = get_prim_count()
   let _ = reset_prims()
@@ -477,7 +477,7 @@ fn build_verts(gltf: json.Value, data: Bytes, bin_off: Int, prim: json.Value) ->
   let attrs = option.unwrap_or(value.get(prim, "attributes"), value.null())
   let pos_i = option.unwrap_or(value.get_int(attrs, "POSITION"), -1)
   let vc = acc_count(gltf, pos_i)
-  let verts = bytes.zeros(vc * STRIDE)
+  var verts = bytes.zeros(vc * STRIDE)
   if pos_i < 0 then verts
   else {
     let pos_base = acc_base(gltf, pos_i)
@@ -518,7 +518,7 @@ fn build_verts(gltf: json.Value, data: Bytes, bin_off: Int, prim: json.Value) ->
 fn build_idx(gltf: json.Value, data: Bytes, bin_off: Int, prim: json.Value) -> Bytes = {
   let idx_i = option.unwrap_or(value.get_int(prim, "indices"), -1)
   let ic = acc_count(gltf, idx_i)
-  let idx = bytes.zeros(ic * 2)
+  var idx = bytes.zeros(ic * 2)
   if idx_i < 0 then idx
   else {
     let base = acc_base(gltf, idx_i)

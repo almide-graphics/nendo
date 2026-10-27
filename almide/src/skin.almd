@@ -13,7 +13,7 @@ import accessor
 // ── Mat4 in Bytes (column-major, 64 bytes) ────────────
 
 fn mat4_identity() -> Bytes = {
-  let m = bytes.zeros(64)
+  var m = bytes.zeros(64)
   bytes.put_f32_le(m, 0, 1.0)
   bytes.put_f32_le(m, 20, 1.0)
   bytes.put_f32_le(m, 40, 1.0)
@@ -22,7 +22,7 @@ fn mat4_identity() -> Bytes = {
 }
 
 fn mat4_from_trs(tx: Float, ty: Float, tz: Float, qx: Float, qy: Float, qz: Float, qw: Float, sx: Float, sy: Float, sz: Float) -> Bytes = {
-  let m = bytes.zeros(64)
+  var m = bytes.zeros(64)
   // Quaternion → rotation matrix, scaled by (sx, sy, sz)
   let x2 = qx + qx
   let y2 = qy + qy
@@ -60,7 +60,7 @@ fn mat4_from_trs(tx: Float, ty: Float, tz: Float, qx: Float, qy: Float, qz: Floa
 }
 
 fn mat4_multiply(a: Bytes, b: Bytes) -> Bytes = {
-  let r = bytes.zeros(64)
+  var r = bytes.zeros(64)
   // Unrolled 4×4 matrix multiply (column-major)
   var col = 0
   while col < 4 {
@@ -94,7 +94,7 @@ fn node_local_transform(node: json.Value) -> Bytes = {
   match value.get_array(node, "matrix") {
     some(mat) => {
       if list.len(mat) == 16 then {
-        let m = bytes.zeros(64)
+        var m = bytes.zeros(64)
         var i = 0
         while i < 16 {
           bytes.put_f32_le(m, i * 4, get_json_float(mat, i, 0.0))
@@ -128,7 +128,7 @@ fn compute_world_transforms(gltf: json.Value) -> Bytes = {
   let nodes = option.unwrap_or(value.get_array(gltf, "nodes"), [])
   let n = list.len(nodes)
   // First compute local transforms
-  let local_mats = bytes.zeros(n * 64)
+  var local_mats = bytes.zeros(n * 64)
   var i = 0
   while i < n {
     let node = list.get(nodes, i) ?? value.null()
@@ -137,7 +137,7 @@ fn compute_world_transforms(gltf: json.Value) -> Bytes = {
     i = i + 1
   }
   // Build parent map: parent[child] = parent_idx, -1 if root
-  let parents = bytes.zeros(n * 4)
+  var parents = bytes.zeros(n * 4)
   bytes.fill(parents, 255) // -1 as i32 LE = 0xFFFFFFFF
   i = 0
   while i < n {
@@ -154,7 +154,7 @@ fn compute_world_transforms(gltf: json.Value) -> Bytes = {
     i = i + 1
   }
   // Compute world = walk up parent chain and multiply
-  let worlds = bytes.zeros(n * 64)
+  var worlds = bytes.zeros(n * 64)
   i = 0
   while i < n {
     let w = compute_node_world(local_mats, parents, n, i)
@@ -167,12 +167,12 @@ fn compute_world_transforms(gltf: json.Value) -> Bytes = {
 fn compute_node_world(local_mats: Bytes, parents: Bytes, n: Int, idx: Int) -> Bytes = {
   // Start with this node's local transform, then prepend parent transforms up the chain.
   // No list allocation — just iterative mat4 multiplication.
-  let result = bytes.zeros(64)
+  var result = bytes.zeros(64)
   bytes.copy_from(result, local_mats, 0, idx * 64, 64)
   var cur = bytes.get_i32_le(parents, idx * 4) ?? 0
   var depth = 0
   while cur >= 0 and cur < n and depth < 64 {
-    let parent_local = bytes.zeros(64)
+    var parent_local = bytes.zeros(64)
     bytes.copy_from(parent_local, local_mats, 0, cur * 64, 64)
     let new_result = mat4_multiply(parent_local, result)
     bytes.copy_from(result, new_result, 0, 0, 64)
@@ -195,16 +195,16 @@ fn compute_joint_matrices(gltf: json.Value, data: Bytes, bin_offset: Int, skin_i
       let ibm_acc = option.unwrap_or(value.get_int(sk, "inverseBindMatrices"), -1)
 
       let worlds = compute_world_transforms(gltf)
-      let result = bytes.zeros(n_joints * 64)
+      var result = bytes.zeros(n_joints * 64)
 
       var ji = 0
       while ji < n_joints {
         let joint_node = option.unwrap_or(value.as_int(list.get(joints, ji) ?? value.int(0))?, 0)
         // World transform of this joint
-        let world = bytes.zeros(64)
+        var world = bytes.zeros(64)
         bytes.copy_from(world, worlds, 0, joint_node * 64, 64)
         // Inverse bind matrix from accessor
-        let ibm = bytes.zeros(64)
+        var ibm = bytes.zeros(64)
         if ibm_acc >= 0 then {
           match accessor.resolve(gltf, ibm_acc) {
             some(info) => {
@@ -236,7 +236,7 @@ fn dbg_first_joint(data: Bytes, bin_offset: Int, joints_info: accessor.AccessorI
   else bytes.get_u16_le(data, jo) ?? 0
 }
 
-fn apply_skinning(verts: Bytes, vert_count: Int, out_stride: Int, joint_matrices: Bytes, data: Bytes, bin_offset: Int, joints_info: accessor.AccessorInfo, weights_info: accessor.AccessorInfo) -> Unit = {
+fn apply_skinning(mut verts: Bytes, vert_count: Int, out_stride: Int, joint_matrices: Bytes, data: Bytes, bin_offset: Int, joints_info: accessor.AccessorInfo, weights_info: accessor.AccessorInfo) -> Unit = {
   let jbase = bin_offset + joints_info.base_offset
   let jstride = joints_info.stride
   let jcomp = joints_info.comp_size  // 1=u8, 2=u16

@@ -37,8 +37,8 @@ pub effect fn load_from_glb(g: GlbData) -> Result[Int, String] = {
 
   // Setup camera
   let aspect = obsid.get_aspect()
-  obsid.orbit_init(0.0, 1.0, 0.0, 0.0, 0.2, 3.0, 0.5, 20.0)
-  obsid.orbit_apply(0.8, aspect, 0.01, 100.0)
+  obsid.orbit_init(0.0, 1.0, 0.0, 0.0, 0.2, 3.0, 0.5, 20.0)!
+  obsid.orbit_apply(0.8, aspect, 0.01, 100.0)!
 
   // Lighting
   obsid.set_dir_light(1.0, 1.0, 1.0, -0.5, -1.0, -0.3)
@@ -50,19 +50,19 @@ pub effect fn load_from_glb(g: GlbData) -> Result[Int, String] = {
 // Re-render frame (call from requestAnimationFrame).
 pub effect fn frame() -> Unit = {
   let aspect = obsid.get_aspect()
-  obsid.orbit_apply(0.8, aspect, 0.01, 100.0)
+  obsid.orbit_apply(0.8, aspect, 0.01, 100.0)!
   obsid.render()
 }
 
 // Orbit camera controls (forwarded to obsid).
 pub effect fn on_pointer_down(x: Float, y: Float) -> Unit =
-  obsid.orbit_on_pointer_down(x, y)
+  obsid.orbit_on_pointer_down(x, y)!
 
 pub effect fn on_pointer_up() -> Unit =
-  obsid.orbit_on_pointer_up()
+  obsid.orbit_on_pointer_up()!
 
 pub effect fn on_pointer_move(x: Float, y: Float) -> Unit =
-  obsid.orbit_on_pointer_move(x, y)
+  obsid.orbit_on_pointer_move(x, y)!
 
 pub effect fn on_wheel(delta_y: Float) -> Unit =
-  obsid.orbit_on_wheel(delta_y)
+  obsid.orbit_on_wheel(delta_y)!
