@@ -10,10 +10,10 @@ effect fn main() -> Unit = {
   let cmd = list.get(args, 0)
 
   match cmd {
-    some("inspect") => cmd_inspect(args),
-    some("validate") => cmd_validate(args),
-    some("tree") => cmd_tree(args),
-    some("dump") => cmd_dump(args),
+    some("inspect") => cmd_inspect(args)!,
+    some("validate") => cmd_validate(args)!,
+    some("tree") => cmd_tree(args)!,
+    some("dump") => cmd_dump(args)!,
     some(other) => println("Unknown command: ${other}\n${usage()}"),
     none => println(usage()),
   }
