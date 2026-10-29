@@ -27,8 +27,8 @@ pub effect fn load_from_glb(g: GlbData) -> Result[Int, String] = {
       ok(md) => {
         obsid.create_mesh(mesh_id)
         obsid.upload_mesh(mesh_id,
-          ffi.to_int(ffi.address(md.vertices)), md.vert_count,
-          ffi.to_int(ffi.address(md.indices)), md.idx_count)
+          ffi.region(md.vertices), md.vert_count,
+          ffi.region(md.indices), md.idx_count)
       },
       err(_) => {},
     }

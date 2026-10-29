@@ -209,7 +209,7 @@ pub effect fn test_render() -> String = {
   var idx = bytes.zeros(0)
   bytes.append_u16_le(idx, 0); bytes.append_u16_le(idx, 1); bytes.append_u16_le(idx, 2)
 
-  obsid.upload_mesh(0, ffi.to_int(ffi.address(verts)), 3, ffi.to_int(ffi.address(idx)), 3)
+  obsid.upload_mesh(0, ffi.region(verts), 3, ffi.region(idx), 3)
   obsid.set_camera(0.8, 1.0, 0.01, 100.0, 0.0, 0.5, 3.0, 0.0, 0.5, 0.0)
   obsid.set_dir_light(1.0, 1.0, 1.0, -0.5, -1.0, -0.3)
   obsid.set_ambient(0.3, 0.3, 0.3)
