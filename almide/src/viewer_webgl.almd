@@ -33,7 +33,7 @@ let MAX_PRIMS = 512
 //   alpha_mode: 0=OPAQUE, 1=MASK(cutout), 2=BLEND
 //   ow = MToon outlineWidthFactor in world units (0 = no outline, the default —
 //   three-vrm only draws outlines for materials that opt in)
-//   vptr/work_ptr are absolute addresses INSIDE g_pool (see below)
+//   vptr/work_ptr are byte offsets INSIDE g_pool (see below)
 let PRIM_STRIDE = 64
 var g_prim_meta = bytes.zeros(32768)
 // per-prim MToon params, 48B:
@@ -42,17 +42,19 @@ let MTOON_BLOB = 48
 var g_prim_mtoon = bytes.zeros(24576)
 
 // ── Geometry/morph pool ──
-// One big static Bytes the JS host writes vertex + morph-delta data into via
-// pool_alloc/pool_ptr. Everything morph-related lives here so Almide can do
-// the blend math with the safe bytes API (no RawPtr bridge on wasm, #440),
-// and the backing memory is never RC-managed per-allocation.
+// One big static Bytes holding vertex + morph-delta data, addressed by byte
+// offsets from pool_alloc (offset 0 = none / exhausted). The JS host hands its
+// data over as a Bytes through pool_store, which copies it in: an address has
+// no Int form (ADR-0031), so the host never writes into g_pool directly.
+// Everything morph-related lives here so Almide can do the blend math with the
+// safe bytes API, and the backing memory is never RC-managed per-allocation.
 let POOL_SIZE = 50331648   // 48 MiB (Almaid face: 8 prims x 57 targets fits)
 var g_pool = bytes.zeros(50331648)
 var g_pool_used = bytes.zeros(4)
 
 // morph tables: [pid * MAX_TARGETS + ti]
 let MAX_TARGETS = 64
-var g_mt_ptr = bytes.zeros(131072)   // i32 absolute delta ptr (xyz f32 per vertex)
+var g_mt_ptr = bytes.zeros(131072)   // i32 delta offset in g_pool (xyz f32 per vertex)
 var g_mt_w = bytes.zeros(131072)     // f32 weight
 
 // ── Skinning ──
@@ -116,8 +118,7 @@ fn m4_mul(d: Int, a: Int, b: Int) -> Unit = {
 
 // compose node-local matrix (T+off) * R(quat) * (S*scale) into pool offset d
 fn compose_local(d: Int, slot: Int) -> Unit = {
-  let base = ffi.to_int(ffi.address(g_pool))
-  let nb = bytes.get_i32_le(g_skel, 4) ?? 0 - base + slot * NODE_BLOB
+  let nb = bytes.get_i32_le(g_skel, 4) ?? 0 + slot * NODE_BLOB
   let tx = bytes.get_f32_le(g_pool, nb + 4) ?? 0.0 + bytes.get_f32_le(g_node_off, slot * 12) ?? 0.0
   let ty = bytes.get_f32_le(g_pool, nb + 8) ?? 0.0 + bytes.get_f32_le(g_node_off, slot * 12 + 4) ?? 0.0
   let tz = bytes.get_f32_le(g_pool, nb + 12) ?? 0.0 + bytes.get_f32_le(g_node_off, slot * 12 + 8) ?? 0.0
@@ -444,9 +445,10 @@ effect fn main() -> Unit = {
   let _ = load_vrm_data(bytes.zeros(0))
   let _ = get_prim_count()
   let _ = reset_prims()
-  let _ = add_prim(0, 0, 0, 0, 0, 0, 0.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0)
+  let _ = add_prim(bytes.zeros(0), 0, bytes.zeros(0), 0, bytes.zeros(0), 0.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0)
   let _ = set_aspect(1.333)
-  let _ = pool_ptr()
+  let _ = pool_store(bytes.zeros(0))
+  let _ = pool_get_f32(0)
   let _ = pool_alloc(0)
   let _ = pool_reset()
   let _ = add_morph_target(0 - 1, 0)
@@ -463,7 +465,7 @@ effect fn main() -> Unit = {
   let _ = get_node_slot(0 - 1)
   let _ = recompute_world()
   let _ = spring_tick(0.0)
-  let _ = update_image(0 - 1, 0, 0)
+  let _ = update_image(0 - 1, bytes.zeros(0))
   let _ = debug_rim(0.0, 0.0, 0.0, 5.0)
 }
 
@@ -573,14 +575,13 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
         let bo = option.unwrap_or(value.get_int(bv, "byteOffset"), 0)
         let bl = option.unwrap_or(value.get_int(bv, "byteLength"), 0)
         let tex = webgl.create_texture()
-        webgl.tex_image_2d_encoded(tex, ffi.to_int(ffi.address(data)) + bin_off + bo, bl)
+        webgl.tex_image_2d_encoded(tex, ffi.region(bytes.slice(data, bin_off + bo, bin_off + bo + bl)))
         bytes.put_i32_le(g_img_tex, ii * 4, tex)
       } else {}
       ii = ii + 1
     }
 
     // ── Skeleton (topo order) + skins — parsed entirely in Almide ──
-    let base2 = ffi.to_int(ffi.address(g_pool))
     let n_nodes = arr_len(gltf, "nodes")
     var sm0 = 0
     while sm0 < MAX_NODES { bytes.put_i32_le(g_slotmap, sm0 * 4, 0 - 1); sm0 = sm0 + 1 }
@@ -590,7 +591,7 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
       let par = pool_alloc(n_nodes * 4)
       let queue = pool_alloc(n_nodes * 4)
       var i2 = 0
-      while i2 < n_nodes { bytes.put_i32_le(g_pool, par - base2 + i2 * 4, 0 - 1); i2 = i2 + 1 }
+      while i2 < n_nodes { bytes.put_i32_le(g_pool, par + i2 * 4, 0 - 1); i2 = i2 + 1 }
       var i3 = 0
       while i3 < n_nodes {
         let nd = arr_at(gltf, "nodes", i3)
@@ -598,7 +599,7 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
         var k2 = 0
         while k2 < nch {
           let ch = ji_at(nd, "children", k2, 0 - 1)
-          if ch >= 0 and ch < n_nodes then { bytes.put_i32_le(g_pool, par - base2 + ch * 4, i3) } else {}
+          if ch >= 0 and ch < n_nodes then { bytes.put_i32_le(g_pool, par + ch * 4, i3) } else {}
           k2 = k2 + 1
         }
         i3 = i3 + 1
@@ -607,14 +608,14 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
       var qt = 0
       var r2 = 0
       while r2 < n_nodes {
-        if bytes.get_i32_le(g_pool, par - base2 + r2 * 4) ?? 0 < 0 then {
-          bytes.put_i32_le(g_pool, queue - base2 + qt * 4, r2)
+        if bytes.get_i32_le(g_pool, par + r2 * 4) ?? 0 < 0 then {
+          bytes.put_i32_le(g_pool, queue + qt * 4, r2)
           qt = qt + 1
         } else {}
         r2 = r2 + 1
       }
       while qh < qt {
-        let cur = bytes.get_i32_le(g_pool, queue - base2 + qh * 4) ?? 0
+        let cur = bytes.get_i32_le(g_pool, queue + qh * 4) ?? 0
         bytes.put_i32_le(g_slotmap, cur * 4, qh)
         let nd2 = arr_at(gltf, "nodes", cur)
         let nch2 = list.len(option.unwrap_or(value.get_array(nd2, "children"), []))
@@ -622,7 +623,7 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
         while k3 < nch2 {
           let ch2 = ji_at(nd2, "children", k3, 0 - 1)
           if ch2 >= 0 and ch2 < n_nodes and qt < n_nodes then {
-            bytes.put_i32_le(g_pool, queue - base2 + qt * 4, ch2)
+            bytes.put_i32_le(g_pool, queue + qt * 4, ch2)
             qt = qt + 1
           } else {}
           k3 = k3 + 1
@@ -632,10 +633,10 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
       let nblob = pool_alloc(n_nodes * NODE_BLOB)
       var s2 = 0
       while s2 < n_nodes {
-        let orig = bytes.get_i32_le(g_pool, queue - base2 + s2 * 4) ?? 0
+        let orig = bytes.get_i32_le(g_pool, queue + s2 * 4) ?? 0
         let nd3 = arr_at(gltf, "nodes", orig)
-        let o2 = nblob - base2 + s2 * NODE_BLOB
-        let p2 = bytes.get_i32_le(g_pool, par - base2 + orig * 4) ?? 0
+        let o2 = nblob + s2 * NODE_BLOB
+        let p2 = bytes.get_i32_le(g_pool, par + orig * 4) ?? 0
         bytes.put_i32_le(g_pool, o2, if p2 < 0 then 0 - 1 else bytes.get_i32_le(g_slotmap, p2 * 4) ?? 0)
         let tr = option.unwrap_or(value.get_array(nd3, "translation"), [])
         let ro = option.unwrap_or(value.get_array(nd3, "rotation"), [])
@@ -663,17 +664,17 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
         while jk < nj {
           let on = ji_at(sk, "joints", jk, 0)
           let slot = if on >= 0 and on < MAX_NODES then bytes.get_i32_le(g_slotmap, on * 4) ?? 0 else 0
-          bytes.put_i32_le(g_pool, jp - base2 + jk * 4, int.max(slot, 0))
+          bytes.put_i32_le(g_pool, jp + jk * 4, int.max(slot, 0))
           jk = jk + 1
         }
         let ibm_i = option.unwrap_or(value.get_int(sk, "inverseBindMatrices"), 0 - 1)
         let mp = pool_alloc(nj * 64)
         if ibm_i >= 0 then {
-          bytes.copy_from(g_pool, data, mp - base2, bin_off + acc_base(gltf, ibm_i), nj * 64)
+          bytes.copy_from(g_pool, data, mp, bin_off + acc_base(gltf, ibm_i), nj * 64)
         } else {
           var idn = 0
           while idn < nj {
-            let mo = mp - base2 + idn * 64
+            let mo = mp + idn * 64
             bytes.put_f32_le(g_pool, mo, 1.0)
             bytes.put_f32_le(g_pool, mo + 20, 1.0)
             bytes.put_f32_le(g_pool, mo + 40, 1.0)
@@ -709,7 +710,7 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
                 some(sh) => match value.get(sh, "sphere") {
                   some(sp) => {
                     let off2 = option.unwrap_or(value.get_array(sp, "offset"), [])
-                    let co2 = cb2 - base2 + c_used * COLLIDER_BLOB
+                    let co2 = cb2 + c_used * COLLIDER_BLOB
                     let cslot = if cn >= 0 and cn < MAX_NODES then bytes.get_i32_le(g_slotmap, cn * 4) ?? 0 else 0 - 1
                     bytes.put_i32_le(g_pool, co2, cslot)
                     bytes.put_f32_le(g_pool, co2 + 4, lf(off2, 0, 0.0))
@@ -742,7 +743,7 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
                 let bn = option.unwrap_or(value.get_int(j0, "node"), 0 - 1)
                 let cn3 = option.unwrap_or(value.get_int(j1, "node"), 0 - 1)
                 if bn >= 0 and bn < MAX_NODES and cn3 >= 0 and cn3 < MAX_NODES then {
-                  let jo2 = jb2 - base2 + used * SPRING_BLOB
+                  let jo2 = jb2 + used * SPRING_BLOB
                   bytes.put_i32_le(g_pool, jo2, bytes.get_i32_le(g_slotmap, bn * 4) ?? 0)
                   bytes.put_i32_le(g_pool, jo2 + 4, bytes.get_i32_le(g_slotmap, cn3 * 4) ?? 0)
                   bytes.put_f32_le(g_pool, jo2 + 8, jnumf(j0, "stiffness", 1.0))
@@ -789,13 +790,13 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
         if pid < MAX_PRIMS and ic > 0 and vc > 0 then {
           // base verts live in the pool so morphs/skinning can rebuild
           let vp = pool_alloc(vc * STRIDE)
-          if vp != 0 then { bytes.copy_from(g_pool, verts, vp - base2, 0, vc * STRIDE) } else {}
+          if vp != 0 then { bytes.copy_from(g_pool, verts, vp, 0, vc * STRIDE) } else {}
           let vbo = webgl.create_buffer()
           webgl.bind_buffer(webgl.array_buffer(), vbo)
-          webgl.buffer_data_f32_ptr(webgl.array_buffer(), ffi.to_int(ffi.address(verts)), vc * STRIDE, webgl.static_draw())
+          webgl.buffer_data_f32_ptr(webgl.array_buffer(), ffi.region(verts), webgl.static_draw())
           let ibo = webgl.create_buffer()
           webgl.bind_buffer(webgl.element_array_buffer(), ibo)
-          webgl.buffer_data_u16_ptr(webgl.element_array_buffer(), ffi.to_int(ffi.address(idxb)), ic * 2, webgl.static_draw())
+          webgl.buffer_data_u16_ptr(webgl.element_array_buffer(), ffi.region(idxb), webgl.static_draw())
 
           let mat_i = option.unwrap_or(value.get_int(prim, "material"), -1)
           var tex_handle = -1
@@ -943,11 +944,11 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
               let tstr = acc_stride(gltf, tp_i, 3)
               dp = pool_alloc(vc * 12)
               if dp != 0 then {
-                if tstr == 12 then { bytes.copy_from(g_pool, data, dp - base2, bin_off + tb, vc * 12) }
+                if tstr == 12 then { bytes.copy_from(g_pool, data, dp, bin_off + tb, vc * 12) }
                 else {
                   var dv = 0
                   while dv < vc {
-                    bytes.copy_from(g_pool, data, dp - base2 + dv * 12, bin_off + tb + dv * tstr, 12)
+                    bytes.copy_from(g_pool, data, dp + dv * 12, bin_off + tb + dv * tstr, 12)
                     dv = dv + 1
                   }
                 }
@@ -973,7 +974,7 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
             if jw != 0 then {
               var v5 = 0
               while v5 < vc {
-                let jo = jw - base2 + v5 * 24
+                let jo = jw + v5 * 24
                 var c5 = 0
                 while c5 < 4 {
                   let jsrc = bin_off + jb + v5 * jstr + c5 * jcs
@@ -1008,10 +1009,10 @@ pub fn load_vrm_data(data: Bytes) -> Int = {
 pub fn get_prim_count() -> Int = bytes.get_i32_le(g_n_prims, 0) ?? 0
 
 // re-upload a loaded image's texture in place (live recolor, no reload)
-pub fn update_image(i: Int, ptr: Int, len: Int) -> Int = {
-  if i >= 0 and i < MAX_IMAGES and len > 0 then {
+pub fn update_image(i: Int, img: Bytes) -> Int = {
+  if i >= 0 and i < MAX_IMAGES and bytes.len(img) > 0 then {
     let t = bytes.get_i32_le(g_img_tex, i * 4) ?? 0
-    if t > 0 then { webgl.tex_image_2d_encoded(t, ptr, len); 0 } else { 0 - 1 }
+    if t > 0 then { webgl.tex_image_2d_encoded(t, ffi.region(img)); 0 } else { 0 - 1 }
   } else { 0 - 1 }
 }
 
@@ -1034,7 +1035,7 @@ pub fn debug_rim(r: Float, g: Float, b: Float, p: Float) -> Int = {
 pub fn get_node_slot(orig: Int) -> Int =
   if orig >= 0 and orig < MAX_NODES then bytes.get_i32_le(g_slotmap, orig * 4) ?? 0 else 0 - 1
 
-// debug: absolute work-buffer ptr of a prim (0 if none yet)
+// debug: work-buffer offset of a prim in g_pool (0 if none yet); read it with pool_get_f32
 pub fn get_prim_work(pid: Int) -> Int =
   if pid >= 0 and pid < MAX_PRIMS then bytes.get_i32_le(g_prim_meta, pid * PRIM_STRIDE + 56) ?? 0 else 0
 
@@ -1148,10 +1149,9 @@ pub fn recompute_world() -> Int = {
   let n = bytes.get_i32_le(g_skel, 0) ?? 0
   if n == 0 then 0
   else {
-    let base = ffi.to_int(ffi.address(g_pool))
-    let nodes = bytes.get_i32_le(g_skel, 4) ?? 0 - base
-    let world = bytes.get_i32_le(g_skel, 8) ?? 0 - base
-    let tmp = bytes.get_i32_le(g_skel, 12) ?? 0 - base
+    let nodes = bytes.get_i32_le(g_skel, 4) ?? 0
+    let world = bytes.get_i32_le(g_skel, 8) ?? 0
+    let tmp = bytes.get_i32_le(g_skel, 12) ?? 0
     var i = 0
     while i < n {
       compose_local(tmp, i)
@@ -1165,9 +1165,9 @@ pub fn recompute_world() -> Int = {
     while s < n_skins {
       let so = s * 16
       let nj = bytes.get_i32_le(g_skins, so) ?? 0
-      let joints = bytes.get_i32_le(g_skins, so + 4) ?? 0 - base
-      let ibm = bytes.get_i32_le(g_skins, so + 8) ?? 0 - base
-      let pal = bytes.get_i32_le(g_skins, so + 12) ?? 0 - base
+      let joints = bytes.get_i32_le(g_skins, so + 4) ?? 0
+      let ibm = bytes.get_i32_le(g_skins, so + 8) ?? 0
+      let pal = bytes.get_i32_le(g_skins, so + 12) ?? 0
       var j = 0
       while j < nj {
         let slot = bytes.get_i32_le(g_pool, joints + j * 4) ?? 0
@@ -1211,11 +1211,10 @@ pub fn spring_tick(dt: Float) -> Int = {
   let nj = bytes.get_i32_le(g_spring, 0) ?? 0
   if nj == 0 or dt <= 0.0 then 0
   else {
-    let base = ffi.to_int(ffi.address(g_pool))
-    let jblob = bytes.get_i32_le(g_spring, 4) ?? 0 - base
+    let jblob = bytes.get_i32_le(g_spring, 4) ?? 0
     let ncol = bytes.get_i32_le(g_spring, 8) ?? 0
-    let cblob = bytes.get_i32_le(g_spring, 12) ?? 0 - base
-    let world = bytes.get_i32_le(g_skel, 8) ?? 0 - base
+    let cblob = bytes.get_i32_le(g_spring, 12) ?? 0
+    let world = bytes.get_i32_le(g_skel, 8) ?? 0
     // 1: rest-with-pose world (spring layer zeroed)
     var z = 0
     let nn = bytes.get_i32_le(g_skel, 0) ?? 0
@@ -1228,7 +1227,7 @@ pub fn spring_tick(dt: Float) -> Int = {
     }
     let _ = recompute_world()
     // scratch: bone pos (12B) + child rest pos (12B)
-    let tmp = bytes.get_i32_le(g_skel, 12) ?? 0 - base   // reuse 64B compose scratch
+    let tmp = bytes.get_i32_le(g_skel, 12) ?? 0   // reuse 64B compose scratch
     var ji = 0
     while ji < nj {
       let jo = jblob + ji * SPRING_BLOB
@@ -1380,9 +1379,10 @@ pub fn spring_tick(dt: Float) -> Int = {
 // ── JS-driven primitive upload (interim path; bypasses Almide json.parse #470) ──
 // The host parses the glTF and hands ready geometry; Almide still owns ALL the
 // GL: program/uniforms/passes here + the buffer/texture creation below.
-//   vptr  : raw ptr to vcount*STRIDE bytes of interleaved verts (pos3 norm3 color3 uv2)
-//   iptr  : raw ptr to icount*2 bytes of u16 indices
-//   img_* : encoded base-color image bytes (img_len 0 = untextured)
+//   verts : vcount*STRIDE bytes of interleaved verts (pos3 norm3 color3 uv2),
+//           copied into g_pool so morphs/skinning can rebuild
+//   idx   : icount*2 bytes of u16 indices
+//   img   : encoded base-color image bytes (empty = untextured)
 pub fn reset_prims() -> Int = {
   // a reload window must not leave stale skeleton/spring state visible to the
   // concurrently-running render loop (rAF keeps firing during openDocument)
@@ -1394,22 +1394,24 @@ pub fn reset_prims() -> Int = {
   0
 }
 
-pub fn add_prim(vptr: Int, vcount: Int, iptr: Int, icount: Int,
-                img_ptr: Int, img_len: Int, sr: Float, sg: Float, sb: Float,
+pub fn add_prim(verts: Bytes, vcount: Int, idx: Bytes, icount: Int,
+                img: Bytes, sr: Float, sg: Float, sb: Float,
                 alpha_mode: Int, ow: Float, ocr: Float, ocg: Float, ocb: Float) -> Int = {
   let pid = bytes.get_i32_le(g_n_prims, 0) ?? 0
-  if pid >= MAX_PRIMS or icount <= 0 or vcount <= 0 then pid
+  if pid >= MAX_PRIMS or icount <= 0 or vcount <= 0 or bytes.len(verts) < vcount * STRIDE or bytes.len(idx) < icount * 2 then pid
   else {
+    let vptr = pool_alloc(vcount * STRIDE)
+    if vptr != 0 then { bytes.copy_from(g_pool, verts, vptr, 0, vcount * STRIDE) } else {}
     let vbo = webgl.create_buffer()
     webgl.bind_buffer(webgl.array_buffer(), vbo)
-    webgl.buffer_data_f32_ptr(webgl.array_buffer(), vptr, vcount * STRIDE, webgl.static_draw())
+    webgl.buffer_data_f32_ptr(webgl.array_buffer(), ffi.region(bytes.take(verts, vcount * STRIDE)), webgl.static_draw())
     let ibo = webgl.create_buffer()
     webgl.bind_buffer(webgl.element_array_buffer(), ibo)
-    webgl.buffer_data_u16_ptr(webgl.element_array_buffer(), iptr, icount * 2, webgl.static_draw())
+    webgl.buffer_data_u16_ptr(webgl.element_array_buffer(), ffi.region(bytes.take(idx, icount * 2)), webgl.static_draw())
     var tex = -1
-    if img_len > 0 then {
+    if bytes.len(img) > 0 then {
       let t = webgl.create_texture()
-      webgl.tex_image_2d_encoded(t, img_ptr, img_len)
+      webgl.tex_image_2d_encoded(t, ffi.region(img))
       tex = t
     } else {}
     let po = pid * PRIM_STRIDE
@@ -1451,27 +1453,39 @@ pub fn add_prim(vptr: Int, vcount: Int, iptr: Int, icount: Int,
 
 // ── Pool + morph API (host writes data, Almide owns the blend math) ──
 
-pub fn pool_ptr() -> Int = ffi.to_int(ffi.address(g_pool))
+// The first POOL_FLOOR bytes are never handed out, so offset 0 stays the
+// "none / exhausted" answer it was when pool_alloc returned addresses.
+let POOL_FLOOR = 16
 
-// Bump-allocate n bytes (4-aligned) inside g_pool; returns ABSOLUTE address.
-// 0 = pool exhausted.
+// Bump-allocate n bytes (4-aligned) inside g_pool; returns its byte OFFSET in
+// g_pool. 0 = pool exhausted.
 pub fn pool_alloc(n: Int) -> Int = {
-  let used = bytes.get_i32_le(g_pool_used, 0) ?? 0
+  let used = int.max(bytes.get_i32_le(g_pool_used, 0) ?? 0, POOL_FLOOR)
   let aligned = (n + 3) / 4 * 4
   if used + aligned > POOL_SIZE then 0
   else {
     bytes.put_i32_le(g_pool_used, 0, used + aligned)
-    ffi.to_int(ffi.address(g_pool)) + used
+    used
   }
 }
+
+// Copy a host-supplied payload into the pool; returns its offset (0 = exhausted).
+pub fn pool_store(b: Bytes) -> Int = {
+  let off = pool_alloc(bytes.len(b))
+  if off != 0 then { bytes.copy_from(g_pool, b, off, 0, bytes.len(b)) } else {}
+  off
+}
+
+// Read one f32 at a pool offset (host-side debug readback).
+pub fn pool_get_f32(off: Int) -> Float = bytes.get_f32_le(g_pool, off) ?? 0.0
 
 pub fn pool_reset() -> Int = {
   bytes.put_i32_le(g_pool_used, 0, 0)
   0
 }
 
-// Register a morph target for prim `pid`. `delta_ptr` = absolute address (in
-// g_pool) of vcount x vec3 f32 position deltas. Returns new target count.
+// Register a morph target for prim `pid`. `delta_ptr` = offset (in g_pool,
+// from pool_store) of vcount x vec3 f32 position deltas. Returns new target count.
 pub fn add_morph_target(pid: Int, delta_ptr: Int) -> Int = {
   if pid < 0 or pid >= MAX_PRIMS then 0
   else {
@@ -1498,7 +1512,7 @@ pub fn set_morph_weight(pid: Int, ti: Int, w: Float) -> Int = {
 // Skin-blend positions+normals of `vc` vertices in-place at work_off.
 // jw blob: per vertex [u16 x4 joint indices][f32 x4 weights] = 24B.
 fn skin_blend(work_off: Int, vc: Int, sid: Int, jw_off: Int) -> Unit = {
-  let pal = bytes.get_i32_le(g_skins, sid * 16 + 12) ?? 0 - ffi.to_int(ffi.address(g_pool))
+  let pal = bytes.get_i32_le(g_skins, sid * 16 + 12) ?? 0
   var vi = 0
   while vi < vc {
     let wo = work_off + vi * STRIDE
@@ -1559,16 +1573,15 @@ pub fn rebuild_prim(pid: Int) -> Int = {
       } else {}
       if work == 0 then 0
       else {
-        let base = ffi.to_int(ffi.address(g_pool))
-        let src_off = vptr - base
-        let dst_off = work - base
+        let src_off = vptr
+        let dst_off = work
         bytes.copy_from(g_pool, g_pool, dst_off, src_off, vc * STRIDE)
         var ti = 0
         while ti < cnt {
           let slot = (pid * MAX_TARGETS + ti) * 4
           let w = bytes.get_f32_le(g_mt_w, slot) ?? 0.0
           if w > 0.0001 or w < 0.0 - 0.0001 then {
-            let d_off = bytes.get_i32_le(g_mt_ptr, slot) ?? 0 - base
+            let d_off = bytes.get_i32_le(g_mt_ptr, slot) ?? 0
             var vi = 0
             while vi < vc {
               let wo = dst_off + vi * STRIDE
@@ -1581,9 +1594,9 @@ pub fn rebuild_prim(pid: Int) -> Int = {
           } else {}
           ti = ti + 1
         }
-        if skinned then skin_blend(dst_off, vc, sid, jw - base) else {}
+        if skinned then skin_blend(dst_off, vc, sid, jw) else {}
         webgl.bind_buffer(webgl.array_buffer(), bytes.get_i32_le(g_prim_meta, po) ?? 0)
-        webgl.buffer_data_f32_ptr(webgl.array_buffer(), work, vc * STRIDE, webgl.dynamic_draw())
+        webgl.buffer_data_f32_ptr(webgl.array_buffer(), ffi.region(bytes.slice(g_pool, work, work + vc * STRIDE)), webgl.dynamic_draw())
         0
       }
     }

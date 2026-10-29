@@ -375,9 +375,7 @@ async function refresh(){
     for(const k of targets){
       const idx=+k;
       const bytes=repl[k]!==undefined?repl[k]:imgBytes(doc.originalBuf,binOff,json,idx);
-      const ptr=Number(inst.exports.__alloc(bytes.length));
-      new Uint8Array(mem.buffer,ptr,bytes.length).set(bytes);
-      inst.exports.update_image(BigInt(idx),BigInt(ptr),BigInt(bytes.length));
+      inst.exports.update_image(BigInt(idx),almideBytes(bytes));
     }
     appliedImgs=new Set(Object.keys(repl));
   } finally {
@@ -387,11 +385,28 @@ async function refresh(){
 }
 
 // ── load geometry into wasm (no UI rebuild) ──
+// Marshal a byte array as an Almide Bytes value ([len][cap][payload]); a Bytes
+// export parameter is the i32 address of that value.
+function almideBytes(u8){
+  const L=u8.byteLength;
+  const val=Number(inst.exports.__alloc(8+L));
+  const dv=new DataView(mem.buffer);
+  dv.setInt32(val,L,true); dv.setInt32(val+4,L,true);
+  new Uint8Array(mem.buffer,val+8,L).set(u8);
+  return val;
+}
+// Pool data goes in by copy (pool_store) and comes back as an OFFSET into the
+// Almide-owned pool: wasm exposes no address of it (ADR-0031).
 function poolWriteF32(arr){
-  const p=Number(inst.exports.pool_alloc(BigInt(arr.length*4)));
+  const f=Float32Array.from(arr);
+  const p=Number(inst.exports.pool_store(almideBytes(new Uint8Array(f.buffer))));
   if(!p){console.warn("pool exhausted");return 0;}
-  new Float32Array(mem.buffer,p,arr.length).set(arr);
   return p;
+}
+function poolReadF32(off,n){
+  const out=new Float32Array(n);
+  for(let i=0;i<n;i++)out[i]=inst.exports.pool_get_f32(BigInt(off+i*4));
+  return out;
 }
 
 // ── skeleton / skins upload (re-pushed on every uploadModel; pool is reset) ──
@@ -552,11 +567,7 @@ function uploadModel(buf){
   const {json,binOff}=glbChunks(buf);
   inst.exports.reset_prims(); inst.exports.pool_reset();
   // marshal the file as an Almide Bytes value: [len][cap][payload]
-  const L=buf.byteLength;
-  const val=Number(inst.exports.__alloc(8+L));
-  const dv=new DataView(mem.buffer);
-  dv.setInt32(val,L,true); dv.setInt32(val+4,L,true);
-  new Uint8Array(mem.buffer,val+8,L).set(new Uint8Array(buf));
+  const val=almideBytes(new Uint8Array(buf));
   const n=Number(inst.exports.load_vrm_data(val));  // Bytes param is i32
   // mirror the prim walk for pid mapping (same accept condition as Almide)
   const meshPrims={};
@@ -861,7 +872,7 @@ function applyUrlParams(){
       inst.exports.set_morph_weight(BigInt(pid),BigInt(base),1.0);
       inst.exports.rebuild_prim(BigInt(pid));
       // find max |coord| in first 200 verts as sanity
-      const a=new Float32Array(mem.buffer,w0,200*11);
+      const a=poolReadF32(w0,200*11);
       let mx=0;
       for(let i=0;i<200;i++)for(let c=0;c<3;c++)mx=Math.max(mx,Math.abs(a[i*11+c]));
       lines.push(`p${pid}b${base}m${mx.toFixed(2)}`);
@@ -875,10 +886,10 @@ function applyUrlParams(){
     // snapshot base verts (vptr unknown to JS — use work after a no-weight rebuild)
     inst.exports.rebuild_prim(BigInt(pid));
     const w0=Number(inst.exports.get_prim_work(BigInt(pid)));
-    const before=new Float32Array(mem.buffer.slice(0),w0,12852/3*11).slice();
+    const before=poolReadF32(w0,12852/3*11);
     inst.exports.set_morph_weight(BigInt(pid),BigInt(base+0),1.0);  // 横幅
     inst.exports.rebuild_prim(BigInt(pid));
-    const after=new Float32Array(mem.buffer,w0,12852/3*11);
+    const after=poolReadF32(w0,12852/3*11);
     let mx=0,mi=-1;
     for(let i=0;i<after.length/11;i++){
       const d=Math.hypot(after[i*11]-before[i*11],after[i*11+1]-before[i*11+1],after[i*11+2]-before[i*11+2]);
