@@ -99,9 +99,11 @@ fn compile(kind: Int, src: String) -> Int = {
   sh
 }
 
-pub fn load_avatar(ptr: Int, len: Int) -> Int = {
+// `png` is the encoded image the host hands over as a Bytes value: an address
+// has no Int form (ADR-0031), so the texture upload takes its ffi.Region.
+pub fn load_avatar(png: Bytes) -> Int = {
   let tex = webgl.create_texture()
-  webgl.tex_image_2d_encoded(tex, ptr, len)
+  webgl.tex_image_2d_encoded(tex, ffi.region(png))
   bytes.put_i32_le(g_state, 12, tex)
   1
 }
