@@ -103,7 +103,7 @@ fn vrm_title(j: json.Value, v: VrmVersion) -> String =
     some(root) => {
       let key = if v == V1 then "name" else "title"
       match value.get(root, "meta") {
-        some(m) => option.unwrap_or(value.get_string(m, key), ""),
+        some(m) => value.get_string(m, key) ?? "",
         none => "",
       }
     },
@@ -119,7 +119,7 @@ fn vrm_author(j: json.Value, v: VrmVersion) -> String =
           some(arr) => list.join(list.filter_map(arr, (x) => value.as_string(x)?), ", "),
           none => "",
         },
-        _ => option.unwrap_or(value.get_string(m, "author"), ""),
+        _ => value.get_string(m, "author") ?? "",
       },
     },
   }

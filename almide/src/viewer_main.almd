@@ -87,17 +87,17 @@ pub effect fn load_vrm_data(data: Bytes) -> Int = {
       }
 
       // Upload images as textures
-      let images = option.unwrap_or(value.get_array(gltf, "images"), [])
-      let buffer_views = option.unwrap_or(value.get_array(gltf, "bufferViews"), [])
+      let images = value.get_array(gltf, "images") ?? []
+      let buffer_views = value.get_array(gltf, "bufferViews") ?? []
       var img_id = 0
       while img_id < list.len(images) {
         let img = list.get(images, img_id) ?? value.null()
-        let bv_idx = option.unwrap_or(value.get_int(img, "bufferView"), -1)
+        let bv_idx = value.get_int(img, "bufferView") ?? -1
         if bv_idx >= 0 then {
           match list.get(buffer_views, bv_idx) {
             some(bv) => {
-              let bv_off = option.unwrap_or(value.get_int(bv, "byteOffset"), 0)
-              let bv_len = option.unwrap_or(value.get_int(bv, "byteLength"), 0)
+              let bv_off = value.get_int(bv, "byteOffset") ?? 0
+              let bv_len = value.get_int(bv, "byteLength") ?? 0
               obsid.upload_texture_raw(img_id, ffi.region(bytes.slice(data, bin_off + bv_off, bin_off + bv_off + bv_len)))
             },
             none => {},
@@ -107,11 +107,11 @@ pub effect fn load_vrm_data(data: Bytes) -> Int = {
       }
 
       // Compute skinning joint matrices
-      let skins_arr = option.unwrap_or(value.get_array(gltf, "skins"), [])
+      let skins_arr = value.get_array(gltf, "skins") ?? []
       let n_skins = list.len(skins_arr)
       let n_joints = if n_skins > 0 then {
         let sk = list.get(skins_arr, 0) ?? value.null()
-        list.len(option.unwrap_or(value.get_array(sk, "joints"), []))
+        list.len(value.get_array(sk, "joints") ?? [])
       } else 0
       var joint_mats = bytes.zeros(n_joints * 64)
       if n_joints > 0 then {
@@ -121,8 +121,8 @@ pub effect fn load_vrm_data(data: Bytes) -> Int = {
       let has_skin = n_joints > 0
 
       // Upload meshes + store metadata
-      let textures = option.unwrap_or(value.get_array(gltf, "textures"), [])
-      let materials = option.unwrap_or(value.get_array(gltf, "materials"), [])
+      let textures = value.get_array(gltf, "textures") ?? []
+      let materials = value.get_array(gltf, "materials") ?? []
       var obsid_id = 0
       var mesh_id = 0
       while mesh_id < n_meshes {
@@ -133,8 +133,8 @@ pub effect fn load_vrm_data(data: Bytes) -> Int = {
           let prim = list.get(prims, pi) ?? value.null()
 
           // Pre-compute vert_count to allocate persistent base_verts BEFORE arena
-          let attrs = option.unwrap_or(value.get(prim, "attributes"), value.null())
-          let pos_idx = option.unwrap_or(value.get_int(attrs, "POSITION"), -1)
+          let attrs = value.get(prim, "attributes") ?? value.null()
+          let pos_idx = value.get_int(attrs, "POSITION") ?? -1
           let vert_count = if pos_idx >= 0 then accessor.element_count(gltf, pos_idx) else 0
 
           // Allocate persistent base vertex buffer (survives arena restore)
@@ -148,8 +148,8 @@ pub effect fn load_vrm_data(data: Bytes) -> Int = {
               // Apply CPU skinning (in place on a var copy of the built vertices)
               var verts = m.vertices
               if has_skin then {
-                let j_idx = option.unwrap_or(value.get_int(attrs, "JOINTS_0"), -1)
-                let w_idx = option.unwrap_or(value.get_int(attrs, "WEIGHTS_0"), -1)
+                let j_idx = value.get_int(attrs, "JOINTS_0") ?? -1
+                let w_idx = value.get_int(attrs, "WEIGHTS_0") ?? -1
                 if j_idx >= 0 and w_idx >= 0 then {
                   match accessor.resolve(gltf, j_idx) {
                     some(ji) => match accessor.resolve(gltf, w_idx) {
@@ -167,18 +167,18 @@ pub effect fn load_vrm_data(data: Bytes) -> Int = {
               obsid.upload_mesh(obsid_id, ffi.region(verts), m.vert_count, ffi.region(m.indices), m.idx_count)
 
               // Bind texture + toon
-              let mat_i = option.unwrap_or(value.get_int(prim, "material"), -1)
+              let mat_i = value.get_int(prim, "material") ?? -1
               if mat_i >= 0 then {
                 match list.get(materials, mat_i) {
                   some(mat) => {
                     match value.get(mat, "pbrMetallicRoughness") {
                       some(pbr) => match value.get(pbr, "baseColorTexture") {
                         some(bct) => {
-                          let tex_idx = option.unwrap_or(value.get_int(bct, "index"), -1)
+                          let tex_idx = value.get_int(bct, "index") ?? -1
                           if tex_idx >= 0 then {
                             match list.get(textures, tex_idx) {
                               some(tex) => {
-                                let src = option.unwrap_or(value.get_int(tex, "source"), -1)
+                                let src = value.get_int(tex, "source") ?? -1
                                 if src >= 0 then obsid.set_mesh_texture(obsid_id, src) else {}
                               },
                               none => {},
@@ -224,11 +224,11 @@ pub effect fn load_vrm_data(data: Bytes) -> Int = {
                   bytes.put_i32_le(g_morph_data_pos, 0, morph_pos + m.vert_count * 44)
                 } else {}
                 // Copy morph target deltas into g_morph_data (persistent flat buffer)
-                let targets = option.unwrap_or(value.get_array(prim, "targets"), [])
+                let targets = value.get_array(prim, "targets") ?? []
                 var ti = 0
                 while ti < list.len(targets) and ti < MAX_MORPHS_PER_PRIM {
                   let target = list.get(targets, ti) ?? value.null()
-                  let delta_idx = option.unwrap_or(value.get_int(target, "POSITION"), -1)
+                  let delta_idx = value.get_int(target, "POSITION") ?? -1
                   if delta_idx >= 0 then {
                     match accessor.resolve(gltf, delta_idx) {
                       some(di) => {
@@ -281,7 +281,7 @@ fn get_vrm0_shade_color(gltf: json.Value, mat_idx: Int, idx: Int) -> Float = {
             none => 0.6,
             some(vp) => match value.get_array(vp, "_ShadeColor") {
               none => 0.6,
-              some(arr) => option.unwrap_or(value.as_float(list.get(arr, idx) ?? value.float(0.6))?, 0.6),
+              some(arr) => value.as_float(list.get(arr, idx) ?? value.float(0.6))? ?? 0.6,
             },
           },
         },

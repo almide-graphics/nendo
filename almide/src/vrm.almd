@@ -70,7 +70,7 @@ fn meta(vrm: Vrm) -> Option[json.Value] =
 fn title(vrm: Vrm) -> String = {
   let key = if vrm.version == V1 then "name" else "title"
   match meta(vrm) {
-    some(m) => option.unwrap_or(value.get_string(m, key), ""),
+    some(m) => value.get_string(m, key) ?? "",
     none => "",
   }
 }
@@ -85,7 +85,7 @@ fn author(vrm: Vrm) -> String =
         },
         none => "",
       },
-      _ => option.unwrap_or(value.get_string(m, "author"), ""),
+      _ => value.get_string(m, "author") ?? "",
     },
     none => "",
   }
@@ -101,7 +101,7 @@ fn human_bones(vrm: Vrm) -> List[json.Value] =
             let entries = (value.as_object(bones) ?? []) |> list.map(((k, _)) => k)
             list.map(entries, (name) => {
               let node = match value.get(bones, name) {
-                some(b) => option.unwrap_or(value.get_int(b, "node"), -1),
+                some(b) => value.get_int(b, "node") ?? -1,
                 none => -1,
               }
               value.object([("bone", value.string(name)), ("node", value.int(node))])
@@ -109,7 +109,7 @@ fn human_bones(vrm: Vrm) -> List[json.Value] =
           },
           none => [],
         },
-        V0 => option.unwrap_or(value.get_array(h, "humanBones"), []),
+        V0 => value.get_array(h, "humanBones") ?? [],
         Unknown => [],
       },
     },
@@ -120,7 +120,7 @@ fn expression_count(vrm: Vrm) -> Int =
     none => 0,
     some(root) => match vrm.version {
       V1 => {
-        let expr = option.unwrap_or(value.get(root, "expressions"), value.null())
+        let expr = value.get(root, "expressions") ?? value.null()
         let preset = match value.get(expr, "preset") {
           some(p) => list.len(value.as_object(p) ?? []),
           none => 0,
@@ -132,7 +132,7 @@ fn expression_count(vrm: Vrm) -> Int =
         preset + custom
       },
       V0 => {
-        let bsm = option.unwrap_or(value.get(root, "blendShapeMaster"), value.null())
+        let bsm = value.get(root, "blendShapeMaster") ?? value.null()
         match value.get_array(bsm, "blendShapeGroups") {
           some(g) => list.len(g),
           none => 0,

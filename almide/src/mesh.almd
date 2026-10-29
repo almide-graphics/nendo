@@ -21,13 +21,13 @@ type MeshData = {
 // prim: the primitive JSON (has "targets" array)
 // weights: Bytes of morph_count × float32 LE
 fn apply_morph(gltf_json: json.Value, bin: Bytes, bin_offset: Int, prim: json.Value, mut verts: Bytes, vert_count: Int, out_stride: Int, weights: Bytes) -> Unit = {
-  let targets = option.unwrap_or(value.get_array(prim, "targets"), [])
+  let targets = value.get_array(prim, "targets") ?? []
   var ti = 0
   while ti < list.len(targets) {
     let w = bytes.get_f32_le(weights, ti * 4) ?? 0.0
     if w > 0.001 or w < -0.001 then {
       let target = list.get(targets, ti) ?? value.null()
-      let pos_delta_idx = option.unwrap_or(value.get_int(target, "POSITION"), -1)
+      let pos_delta_idx = value.get_int(target, "POSITION") ?? -1
       if pos_delta_idx >= 0 then {
         match accessor.resolve(gltf_json, pos_delta_idx) {
           some(di) => {
@@ -55,40 +55,40 @@ fn apply_morph(gltf_json: json.Value, bin: Bytes, bin_offset: Int, prim: json.Va
 
 // Returns the primitives list for a mesh (caller iterates with build_primitive).
 fn get_primitives(gltf_json: json.Value, mesh_idx: Int) -> List[json.Value] = {
-  let meshes = option.unwrap_or(value.get_array(gltf_json, "meshes"), [])
+  let meshes = value.get_array(gltf_json, "meshes") ?? []
   if list.len(meshes) <= mesh_idx then []
   else {
     let mesh_val = list.get(meshes, mesh_idx) ?? value.null()
-    option.unwrap_or(value.get_array(mesh_val, "primitives"), [])
+    value.get_array(mesh_val, "primitives") ?? []
   }
 }
 
 fn build_primitive(gltf_json: json.Value, bin: Bytes, bin_offset: Int, prim: json.Value) -> Option[MeshData] = {
-  let attrs = option.unwrap_or(value.get(prim, "attributes"), value.null())
-  let pos_idx = option.unwrap_or(value.get_int(attrs, "POSITION"), -1)
+  let attrs = value.get(prim, "attributes") ?? value.null()
+  let pos_idx = value.get_int(attrs, "POSITION") ?? -1
   if pos_idx < 0 then none
   else {
   let pos_info = accessor.resolve(gltf_json, pos_idx)
   if option.is_none(pos_info) then none
   else {
-  let pi = option.unwrap_or(pos_info, accessor.AccessorInfo { base_offset: 0, count: 0, components: 0, comp_size: 0, stride: 12 })
+  let pi = pos_info ?? (accessor.AccessorInfo { base_offset: 0, count: 0, components: 0, comp_size: 0, stride: 12 })
   let vert_count = pi.count
   let pos_stride = pi.stride
 
   let has_normal = option.is_some(value.get_int(attrs, "NORMAL"))
-  let norm_idx = option.unwrap_or(value.get_int(attrs, "NORMAL"), -1)
+  let norm_idx = value.get_int(attrs, "NORMAL") ?? -1
   let norm_info = if has_normal then accessor.resolve(gltf_json, norm_idx) else none
   let ni_base = match norm_info { some(ni) => ni.base_offset, none => 0 }
   let norm_stride = match norm_info { some(ni) => ni.stride, none => 12 }
 
   let has_uv = option.is_some(value.get_int(attrs, "TEXCOORD_0"))
-  let uv_idx = option.unwrap_or(value.get_int(attrs, "TEXCOORD_0"), -1)
+  let uv_idx = value.get_int(attrs, "TEXCOORD_0") ?? -1
   let uv_info = if has_uv then accessor.resolve(gltf_json, uv_idx) else none
   let uv_base = match uv_info { some(ui) => ui.base_offset, none => 0 }
   let uv_stride = match uv_info { some(ui) => ui.stride, none => 8 }
 
   // Material base color
-  let mat_idx = option.unwrap_or(value.get_int(prim, "material"), -1)
+  let mat_idx = value.get_int(prim, "material") ?? -1
   let base_r = get_color_component(gltf_json, mat_idx, 0)
   let base_g = get_color_component(gltf_json, mat_idx, 1)
   let base_b = get_color_component(gltf_json, mat_idx, 2)
@@ -122,7 +122,7 @@ fn build_primitive(gltf_json: json.Value, bin: Bytes, bin_offset: Int, prim: jso
   }
 
   // Indices — obsid expects u16, glTF may use u16(5123) or u32(5125)
-  let idx_acc = option.unwrap_or(value.get_int(prim, "indices"), -1)
+  let idx_acc = value.get_int(prim, "indices") ?? -1
   let idx_info = if idx_acc >= 0 then accessor.resolve(gltf_json, idx_acc) else none
   let idx_count = match idx_info { some(ii) => ii.count, none => 0 }
   var idx_data = bytes.zeros(idx_count * 2)
@@ -142,7 +142,7 @@ fn build_primitive(gltf_json: json.Value, bin: Bytes, bin_offset: Int, prim: jso
     none => {},
   }
 
-  let morph_count = list.len(option.unwrap_or(value.get_array(prim, "targets"), []))
+  let morph_count = list.len(value.get_array(prim, "targets") ?? [])
   some(MeshData { vertices: verts, indices: idx_data, vert_count: vert_count, idx_count: idx_count, morph_count: morph_count })
   }
   }
@@ -166,14 +166,14 @@ fn get_color_component(gltf_json: json.Value, mat_idx: Int, idx: Int) -> Float =
     if vrm_color >= 0.0 then vrm_color
     else {
       // Fallback to PBR baseColorFactor
-      let materials = option.unwrap_or(value.get_array(gltf_json, "materials"), [])
+      let materials = value.get_array(gltf_json, "materials") ?? []
       match list.get(materials, mat_idx) {
         none => 0.8,
         some(mat) => match value.get(mat, "pbrMetallicRoughness") {
           none => 0.8,
           some(pbr) => match value.get_array(pbr, "baseColorFactor") {
             none => 0.8,
-            some(arr) => option.unwrap_or(value.as_float(list.get(arr, idx) ?? value.float(0.8))?, 0.8),
+            some(arr) => value.as_float(list.get(arr, idx) ?? value.float(0.8))? ?? 0.8,
           },
         },
       }
@@ -196,7 +196,7 @@ fn get_vrm0_color(gltf_json: json.Value, mat_idx: Int, idx: Int) -> Float = {
             none => -1.0,
             some(vp) => match value.get_array(vp, "_Color") {
               none => -1.0,
-              some(arr) => option.unwrap_or(value.as_float(list.get(arr, idx) ?? value.float(-1.0))?, -1.0),
+              some(arr) => value.as_float(list.get(arr, idx) ?? value.float(-1.0))? ?? -1.0,
             },
           },
         },

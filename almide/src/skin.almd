@@ -87,7 +87,7 @@ fn mat4_multiply(a: Bytes, b: Bytes) -> Bytes = {
 // ── Node World Transforms ─────────────────────────
 
 fn get_json_float(arr: List[json.Value], idx: Int, default: Float) -> Float =
-  option.unwrap_or(value.as_float(list.get(arr, idx) ?? value.float(default))?, default)
+  value.as_float(list.get(arr, idx) ?? value.float(default))? ?? default
 
 fn node_local_transform(node: json.Value) -> Bytes = {
   // Check for direct "matrix" first
@@ -105,16 +105,16 @@ fn node_local_transform(node: json.Value) -> Bytes = {
     },
     none => {
       // TRS decomposition
-      let t = option.unwrap_or(value.get_array(node, "translation"), [])
+      let t = value.get_array(node, "translation") ?? []
       let tx = get_json_float(t, 0, 0.0)
       let ty = get_json_float(t, 1, 0.0)
       let tz = get_json_float(t, 2, 0.0)
-      let r = option.unwrap_or(value.get_array(node, "rotation"), [])
+      let r = value.get_array(node, "rotation") ?? []
       let qx = get_json_float(r, 0, 0.0)
       let qy = get_json_float(r, 1, 0.0)
       let qz = get_json_float(r, 2, 0.0)
       let qw = get_json_float(r, 3, 1.0)
-      let s = option.unwrap_or(value.get_array(node, "scale"), [])
+      let s = value.get_array(node, "scale") ?? []
       let sx = get_json_float(s, 0, 1.0)
       let sy = get_json_float(s, 1, 1.0)
       let sz = get_json_float(s, 2, 1.0)
@@ -125,7 +125,7 @@ fn node_local_transform(node: json.Value) -> Bytes = {
 
 // Compute world transforms for all nodes. Returns Bytes (n_nodes × 64 bytes).
 fn compute_world_transforms(gltf: json.Value) -> Bytes = {
-  let nodes = option.unwrap_or(value.get_array(gltf, "nodes"), [])
+  let nodes = value.get_array(gltf, "nodes") ?? []
   let n = list.len(nodes)
   // First compute local transforms
   var local_mats = bytes.zeros(n * 64)
@@ -142,10 +142,10 @@ fn compute_world_transforms(gltf: json.Value) -> Bytes = {
   i = 0
   while i < n {
     let node = list.get(nodes, i) ?? value.null()
-    let children = option.unwrap_or(value.get_array(node, "children"), [])
+    let children = value.get_array(node, "children") ?? []
     var ci = 0
     while ci < list.len(children) {
-      let child = option.unwrap_or(value.as_int(list.get(children, ci) ?? value.int(-1))?, -1)
+      let child = value.as_int(list.get(children, ci) ?? value.int(-1))? ?? -1
       if child >= 0 and child < n then {
         bytes.put_i32_le(parents, child * 4, i)
       } else {}
@@ -186,20 +186,20 @@ fn compute_node_world(local_mats: Bytes, parents: Bytes, n: Int, idx: Int) -> By
 
 // Returns Bytes: n_joints × 64 bytes. Each = worldTransform[joint] * inverseBindMatrix[joint].
 fn compute_joint_matrices(gltf: json.Value, data: Bytes, bin_offset: Int, skin_idx: Int) -> Bytes = {
-  let skins = option.unwrap_or(value.get_array(gltf, "skins"), [])
+  let skins = value.get_array(gltf, "skins") ?? []
   match list.get(skins, skin_idx) {
     none => bytes.zeros(0),
     some(sk) => {
-      let joints = option.unwrap_or(value.get_array(sk, "joints"), [])
+      let joints = value.get_array(sk, "joints") ?? []
       let n_joints = list.len(joints)
-      let ibm_acc = option.unwrap_or(value.get_int(sk, "inverseBindMatrices"), -1)
+      let ibm_acc = value.get_int(sk, "inverseBindMatrices") ?? -1
 
       let worlds = compute_world_transforms(gltf)
       var result = bytes.zeros(n_joints * 64)
 
       var ji = 0
       while ji < n_joints {
-        let joint_node = option.unwrap_or(value.as_int(list.get(joints, ji) ?? value.int(0))?, 0)
+        let joint_node = value.as_int(list.get(joints, ji) ?? value.int(0))? ?? 0
         // World transform of this joint
         var world = bytes.zeros(64)
         bytes.copy_from(world, worlds, 0, joint_node * 64, 64)

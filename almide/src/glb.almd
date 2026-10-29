@@ -132,7 +132,7 @@ fn extract_image(glb: GlbFile, image_index: Int) -> Result[Bytes, String] = {
     some(b) => b,
     none => err("bufferView out of range"),
   }
-  let offset = option.unwrap_or(value.get_int(bv, "byteOffset"), 0)
+  let offset = value.get_int(bv, "byteOffset") ?? 0
   let length = match value.get_int(bv, "byteLength") {
     some(l) => l,
     none => err("no byteLength"),
