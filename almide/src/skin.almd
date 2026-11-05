@@ -13,16 +13,16 @@ import accessor
 // ── Mat4 in Bytes (column-major, 64 bytes) ────────────
 
 fn mat4_identity() -> Bytes = {
-  let m = bytes.new(64)
-  bytes.set_f32_le(m, 0, 1.0)
-  bytes.set_f32_le(m, 20, 1.0)
-  bytes.set_f32_le(m, 40, 1.0)
-  bytes.set_f32_le(m, 60, 1.0)
+  var m = bytes.zeros(64)
+  bytes.put_f32_le(m, 0, 1.0)
+  bytes.put_f32_le(m, 20, 1.0)
+  bytes.put_f32_le(m, 40, 1.0)
+  bytes.put_f32_le(m, 60, 1.0)
   m
 }
 
 fn mat4_from_trs(tx: Float, ty: Float, tz: Float, qx: Float, qy: Float, qz: Float, qw: Float, sx: Float, sy: Float, sz: Float) -> Bytes = {
-  let m = bytes.new(64)
+  var m = bytes.zeros(64)
   // Quaternion → rotation matrix, scaled by (sx, sy, sz)
   let x2 = qx + qx
   let y2 = qy + qy
@@ -37,46 +37,46 @@ fn mat4_from_trs(tx: Float, ty: Float, tz: Float, qx: Float, qy: Float, qz: Floa
   let wy = qw * y2
   let wz = qw * z2
   // Column 0 (scaled by sx)
-  bytes.set_f32_le(m, 0, (1.0 - yy - zz) * sx)
-  bytes.set_f32_le(m, 4, (xy + wz) * sx)
-  bytes.set_f32_le(m, 8, (xz - wy) * sx)
-  bytes.set_f32_le(m, 12, 0.0)
+  bytes.put_f32_le(m, 0, (1.0 - yy - zz) * sx)
+  bytes.put_f32_le(m, 4, (xy + wz) * sx)
+  bytes.put_f32_le(m, 8, (xz - wy) * sx)
+  bytes.put_f32_le(m, 12, 0.0)
   // Column 1 (scaled by sy)
-  bytes.set_f32_le(m, 16, (xy - wz) * sy)
-  bytes.set_f32_le(m, 20, (1.0 - xx - zz) * sy)
-  bytes.set_f32_le(m, 24, (yz + wx) * sy)
-  bytes.set_f32_le(m, 28, 0.0)
+  bytes.put_f32_le(m, 16, (xy - wz) * sy)
+  bytes.put_f32_le(m, 20, (1.0 - xx - zz) * sy)
+  bytes.put_f32_le(m, 24, (yz + wx) * sy)
+  bytes.put_f32_le(m, 28, 0.0)
   // Column 2 (scaled by sz)
-  bytes.set_f32_le(m, 32, (xz + wy) * sz)
-  bytes.set_f32_le(m, 36, (yz - wx) * sz)
-  bytes.set_f32_le(m, 40, (1.0 - xx - yy) * sz)
-  bytes.set_f32_le(m, 44, 0.0)
+  bytes.put_f32_le(m, 32, (xz + wy) * sz)
+  bytes.put_f32_le(m, 36, (yz - wx) * sz)
+  bytes.put_f32_le(m, 40, (1.0 - xx - yy) * sz)
+  bytes.put_f32_le(m, 44, 0.0)
   // Column 3 (translation)
-  bytes.set_f32_le(m, 48, tx)
-  bytes.set_f32_le(m, 52, ty)
-  bytes.set_f32_le(m, 56, tz)
-  bytes.set_f32_le(m, 60, 1.0)
+  bytes.put_f32_le(m, 48, tx)
+  bytes.put_f32_le(m, 52, ty)
+  bytes.put_f32_le(m, 56, tz)
+  bytes.put_f32_le(m, 60, 1.0)
   m
 }
 
 fn mat4_multiply(a: Bytes, b: Bytes) -> Bytes = {
-  let r = bytes.new(64)
+  var r = bytes.zeros(64)
   // Unrolled 4×4 matrix multiply (column-major)
   var col = 0
   while col < 4 {
     let bc = col * 16
-    let b0 = bytes.read_f32_le(b, bc)
-    let b1 = bytes.read_f32_le(b, bc + 4)
-    let b2 = bytes.read_f32_le(b, bc + 8)
-    let b3 = bytes.read_f32_le(b, bc + 12)
+    let b0 = bytes.get_f32_le(b, bc) ?? 0.0
+    let b1 = bytes.get_f32_le(b, bc + 4) ?? 0.0
+    let b2 = bytes.get_f32_le(b, bc + 8) ?? 0.0
+    let b3 = bytes.get_f32_le(b, bc + 12) ?? 0.0
     var row = 0
     while row < 4 {
       let ro = row * 4
-      let v = bytes.read_f32_le(a, ro) * b0
-            + bytes.read_f32_le(a, 16 + ro) * b1
-            + bytes.read_f32_le(a, 32 + ro) * b2
-            + bytes.read_f32_le(a, 48 + ro) * b3
-      bytes.set_f32_le(r, bc + ro, v)
+      let v = bytes.get_f32_le(a, ro) ?? 0.0 * b0
+            + bytes.get_f32_le(a, 16 + ro) ?? 0.0 * b1
+            + bytes.get_f32_le(a, 32 + ro) ?? 0.0 * b2
+            + bytes.get_f32_le(a, 48 + ro) ?? 0.0 * b3
+      bytes.put_f32_le(r, bc + ro, v)
       row = row + 1
     }
     col = col + 1
@@ -87,17 +87,17 @@ fn mat4_multiply(a: Bytes, b: Bytes) -> Bytes = {
 // ── Node World Transforms ─────────────────────────
 
 fn get_json_float(arr: List[json.Value], idx: Int, default: Float) -> Float =
-  option.unwrap_or(json.as_float(list.get_or(arr, idx, json.from_float(default))), default)
+  value.as_float(list.get(arr, idx) ?? value.float(default))? ?? default
 
 fn node_local_transform(node: json.Value) -> Bytes = {
   // Check for direct "matrix" first
-  match json.get_array(node, "matrix") {
+  match value.get_array(node, "matrix") {
     some(mat) => {
       if list.len(mat) == 16 then {
-        let m = bytes.new(64)
+        var m = bytes.zeros(64)
         var i = 0
         while i < 16 {
-          bytes.set_f32_le(m, i * 4, get_json_float(mat, i, 0.0))
+          bytes.put_f32_le(m, i * 4, get_json_float(mat, i, 0.0))
           i = i + 1
         }
         m
@@ -105,16 +105,16 @@ fn node_local_transform(node: json.Value) -> Bytes = {
     },
     none => {
       // TRS decomposition
-      let t = option.unwrap_or(json.get_array(node, "translation"), [])
+      let t = value.get_array(node, "translation") ?? []
       let tx = get_json_float(t, 0, 0.0)
       let ty = get_json_float(t, 1, 0.0)
       let tz = get_json_float(t, 2, 0.0)
-      let r = option.unwrap_or(json.get_array(node, "rotation"), [])
+      let r = value.get_array(node, "rotation") ?? []
       let qx = get_json_float(r, 0, 0.0)
       let qy = get_json_float(r, 1, 0.0)
       let qz = get_json_float(r, 2, 0.0)
       let qw = get_json_float(r, 3, 1.0)
-      let s = option.unwrap_or(json.get_array(node, "scale"), [])
+      let s = value.get_array(node, "scale") ?? []
       let sx = get_json_float(s, 0, 1.0)
       let sy = get_json_float(s, 1, 1.0)
       let sz = get_json_float(s, 2, 1.0)
@@ -125,36 +125,36 @@ fn node_local_transform(node: json.Value) -> Bytes = {
 
 // Compute world transforms for all nodes. Returns Bytes (n_nodes × 64 bytes).
 fn compute_world_transforms(gltf: json.Value) -> Bytes = {
-  let nodes = option.unwrap_or(json.get_array(gltf, "nodes"), [])
+  let nodes = value.get_array(gltf, "nodes") ?? []
   let n = list.len(nodes)
   // First compute local transforms
-  let local_mats = bytes.new(n * 64)
+  var local_mats = bytes.zeros(n * 64)
   var i = 0
   while i < n {
-    let node = list.get_or(nodes, i, json.null())
+    let node = list.get(nodes, i) ?? value.null()
     let lm = node_local_transform(node)
     bytes.copy_from(local_mats, lm, i * 64, 0, 64)
     i = i + 1
   }
   // Build parent map: parent[child] = parent_idx, -1 if root
-  let parents = bytes.new(n * 4)
+  var parents = bytes.zeros(n * 4)
   bytes.fill(parents, 255) // -1 as i32 LE = 0xFFFFFFFF
   i = 0
   while i < n {
-    let node = list.get_or(nodes, i, json.null())
-    let children = option.unwrap_or(json.get_array(node, "children"), [])
+    let node = list.get(nodes, i) ?? value.null()
+    let children = value.get_array(node, "children") ?? []
     var ci = 0
     while ci < list.len(children) {
-      let child = option.unwrap_or(json.as_int(list.get_or(children, ci, json.from_int(-1))), -1)
+      let child = value.as_int(list.get(children, ci) ?? value.int(-1))? ?? -1
       if child >= 0 and child < n then {
-        bytes.set_i32_le(parents, child * 4, i)
+        bytes.put_i32_le(parents, child * 4, i)
       } else {}
       ci = ci + 1
     }
     i = i + 1
   }
   // Compute world = walk up parent chain and multiply
-  let worlds = bytes.new(n * 64)
+  var worlds = bytes.zeros(n * 64)
   i = 0
   while i < n {
     let w = compute_node_world(local_mats, parents, n, i)
@@ -167,16 +167,16 @@ fn compute_world_transforms(gltf: json.Value) -> Bytes = {
 fn compute_node_world(local_mats: Bytes, parents: Bytes, n: Int, idx: Int) -> Bytes = {
   // Start with this node's local transform, then prepend parent transforms up the chain.
   // No list allocation — just iterative mat4 multiplication.
-  let result = bytes.new(64)
+  var result = bytes.zeros(64)
   bytes.copy_from(result, local_mats, 0, idx * 64, 64)
-  var cur = bytes.read_i32_le(parents, idx * 4)
+  var cur = bytes.get_i32_le(parents, idx * 4) ?? 0
   var depth = 0
   while cur >= 0 and cur < n and depth < 64 {
-    let parent_local = bytes.new(64)
+    var parent_local = bytes.zeros(64)
     bytes.copy_from(parent_local, local_mats, 0, cur * 64, 64)
     let new_result = mat4_multiply(parent_local, result)
     bytes.copy_from(result, new_result, 0, 0, 64)
-    cur = bytes.read_i32_le(parents, cur * 4)
+    cur = bytes.get_i32_le(parents, cur * 4) ?? 0
     depth = depth + 1
   }
   result
@@ -186,25 +186,25 @@ fn compute_node_world(local_mats: Bytes, parents: Bytes, n: Int, idx: Int) -> By
 
 // Returns Bytes: n_joints × 64 bytes. Each = worldTransform[joint] * inverseBindMatrix[joint].
 fn compute_joint_matrices(gltf: json.Value, data: Bytes, bin_offset: Int, skin_idx: Int) -> Bytes = {
-  let skins = option.unwrap_or(json.get_array(gltf, "skins"), [])
+  let skins = value.get_array(gltf, "skins") ?? []
   match list.get(skins, skin_idx) {
-    none => bytes.new(0),
+    none => bytes.zeros(0),
     some(sk) => {
-      let joints = option.unwrap_or(json.get_array(sk, "joints"), [])
+      let joints = value.get_array(sk, "joints") ?? []
       let n_joints = list.len(joints)
-      let ibm_acc = option.unwrap_or(json.get_int(sk, "inverseBindMatrices"), -1)
+      let ibm_acc = value.get_int(sk, "inverseBindMatrices") ?? -1
 
       let worlds = compute_world_transforms(gltf)
-      let result = bytes.new(n_joints * 64)
+      var result = bytes.zeros(n_joints * 64)
 
       var ji = 0
       while ji < n_joints {
-        let joint_node = option.unwrap_or(json.as_int(list.get_or(joints, ji, json.from_int(0))), 0)
+        let joint_node = value.as_int(list.get(joints, ji) ?? value.int(0))? ?? 0
         // World transform of this joint
-        let world = bytes.new(64)
+        var world = bytes.zeros(64)
         bytes.copy_from(world, worlds, 0, joint_node * 64, 64)
         // Inverse bind matrix from accessor
-        let ibm = bytes.new(64)
+        var ibm = bytes.zeros(64)
         if ibm_acc >= 0 then {
           match accessor.resolve(gltf, ibm_acc) {
             some(info) => {
@@ -232,11 +232,11 @@ fn compute_joint_matrices(gltf: json.Value, data: Bytes, bin_offset: Int, skin_i
 fn dbg_first_joint(data: Bytes, bin_offset: Int, joints_info: accessor.AccessorInfo) -> Int = {
   let jo = bin_offset + joints_info.base_offset
   let jcomp = joints_info.comp_size
-  if jcomp == 1 then bytes.get_or(data, jo, -1)
-  else bytes.read_u16_le(data, jo)
+  if jcomp == 1 then bytes.get(data, jo) ?? -1
+  else bytes.get_u16_le(data, jo) ?? 0
 }
 
-fn apply_skinning(verts: Bytes, vert_count: Int, out_stride: Int, joint_matrices: Bytes, data: Bytes, bin_offset: Int, joints_info: accessor.AccessorInfo, weights_info: accessor.AccessorInfo) -> Unit = {
+fn apply_skinning(mut verts: Bytes, vert_count: Int, out_stride: Int, joint_matrices: Bytes, data: Bytes, bin_offset: Int, joints_info: accessor.AccessorInfo, weights_info: accessor.AccessorInfo) -> Unit = {
   let jbase = bin_offset + joints_info.base_offset
   let jstride = joints_info.stride
   let jcomp = joints_info.comp_size  // 1=u8, 2=u16
@@ -247,27 +247,27 @@ fn apply_skinning(verts: Bytes, vert_count: Int, out_stride: Int, joint_matrices
   while i < vert_count {
     let dst = i * out_stride
     // Read original position
-    let px = bytes.read_f32_le(verts, dst)
-    let py = bytes.read_f32_le(verts, dst + 4)
-    let pz = bytes.read_f32_le(verts, dst + 8)
+    let px = bytes.get_f32_le(verts, dst) ?? 0.0
+    let py = bytes.get_f32_le(verts, dst + 4) ?? 0.0
+    let pz = bytes.get_f32_le(verts, dst + 8) ?? 0.0
     // Read original normal
-    let nx = bytes.read_f32_le(verts, dst + 12)
-    let ny = bytes.read_f32_le(verts, dst + 16)
-    let nz = bytes.read_f32_le(verts, dst + 20)
+    let nx = bytes.get_f32_le(verts, dst + 12) ?? 0.0
+    let ny = bytes.get_f32_le(verts, dst + 16) ?? 0.0
+    let nz = bytes.get_f32_le(verts, dst + 20) ?? 0.0
 
     // Read joint indices (u8 or u16)
     let jo = jbase + i * jstride
-    let j0 = if jcomp == 1 then bytes.get_or(data, jo, 0) else bytes.read_u16_le(data, jo)
-    let j1 = if jcomp == 1 then bytes.get_or(data, jo + jcomp, 0) else bytes.read_u16_le(data, jo + jcomp)
-    let j2 = if jcomp == 1 then bytes.get_or(data, jo + jcomp * 2, 0) else bytes.read_u16_le(data, jo + jcomp * 2)
-    let j3 = if jcomp == 1 then bytes.get_or(data, jo + jcomp * 3, 0) else bytes.read_u16_le(data, jo + jcomp * 3)
+    let j0 = if jcomp == 1 then bytes.get(data, jo) ?? 0 else bytes.get_u16_le(data, jo) ?? 0
+    let j1 = if jcomp == 1 then bytes.get(data, jo + jcomp) ?? 0 else bytes.get_u16_le(data, jo + jcomp) ?? 0
+    let j2 = if jcomp == 1 then bytes.get(data, jo + jcomp * 2) ?? 0 else bytes.get_u16_le(data, jo + jcomp * 2) ?? 0
+    let j3 = if jcomp == 1 then bytes.get(data, jo + jcomp * 3) ?? 0 else bytes.get_u16_le(data, jo + jcomp * 3) ?? 0
 
     // Read weights (float32)
     let wo = wbase + i * wstride
-    let w0 = bytes.read_f32_le(data, wo)
-    let w1 = bytes.read_f32_le(data, wo + 4)
-    let w2 = bytes.read_f32_le(data, wo + 8)
-    let w3 = bytes.read_f32_le(data, wo + 12)
+    let w0 = bytes.get_f32_le(data, wo) ?? 0.0
+    let w1 = bytes.get_f32_le(data, wo + 4) ?? 0.0
+    let w2 = bytes.get_f32_le(data, wo + 8) ?? 0.0
+    let w3 = bytes.get_f32_le(data, wo + 12) ?? 0.0
 
     // Blend: skinned = sum(w[k] * jointMatrix[j[k]] * vec4(pos, 1.0))
     var sx = 0.0
@@ -323,20 +323,20 @@ fn apply_skinning(verts: Bytes, vert_count: Int, out_stride: Int, joint_matrices
       snz = snz + w3 * (mat4_get(joint_matrices, mo + 8) * nx + mat4_get(joint_matrices, mo + 24) * ny + mat4_get(joint_matrices, mo + 40) * nz)
     } else {}
 
-    bytes.set_f32_le(verts, dst, sx)
-    bytes.set_f32_le(verts, dst + 4, sy)
-    bytes.set_f32_le(verts, dst + 8, sz)
-    bytes.set_f32_le(verts, dst + 12, snx)
-    bytes.set_f32_le(verts, dst + 16, sny)
-    bytes.set_f32_le(verts, dst + 20, snz)
+    bytes.put_f32_le(verts, dst, sx)
+    bytes.put_f32_le(verts, dst + 4, sy)
+    bytes.put_f32_le(verts, dst + 8, sz)
+    bytes.put_f32_le(verts, dst + 12, snx)
+    bytes.put_f32_le(verts, dst + 16, sny)
+    bytes.put_f32_le(verts, dst + 20, snz)
 
-    bytes.set_f32_le(verts, dst, sx)
-    bytes.set_f32_le(verts, dst + 4, py * (w0 + w1 + w2 + w3))
-    bytes.set_f32_le(verts, dst + 8, pz * (w0 + w1 + w2 + w3))
+    bytes.put_f32_le(verts, dst, sx)
+    bytes.put_f32_le(verts, dst + 4, py * (w0 + w1 + w2 + w3))
+    bytes.put_f32_le(verts, dst + 8, pz * (w0 + w1 + w2 + w3))
 
     i = i + 1
   }
 }
 
 // Fix: mat4_get reads from byte offset, not element index
-fn mat4_get(m: Bytes, byte_offset: Int) -> Float = bytes.read_f32_le(m, byte_offset)
+fn mat4_get(m: Bytes, byte_offset: Int) -> Float = bytes.get_f32_le(m, byte_offset) ?? 0.0

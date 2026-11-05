@@ -21,7 +21,7 @@ type Vrm = {
 }
 
 fn empty() -> Vrm = {
-  let g = glb.GlbFile { json_data: json.null(), bin_data: bytes.new(0) }
+  let g = glb.GlbFile { json_data: value.null(), bin_data: bytes.zeros(0) }
   Vrm { glb: g, version: Unknown }
 }
 
@@ -38,39 +38,39 @@ effect fn save(vrm: Vrm, path: String) -> Result[Unit, String] =
   glb.save(vrm.glb, path)
 
 fn detect_version(j: json.Value) -> VrmVersion = {
-  let ext = json.get(j, "extensions")
+  let ext = value.get(j, "extensions")
   match ext {
     none => Unknown,
     some(e) =>
-      if option.is_some(json.get(e, "VRMC_vrm")) then V1
-      else if option.is_some(json.get(e, "VRM")) then V0
+      if option.is_some(value.get(e, "VRMC_vrm")) then V1
+      else if option.is_some(value.get(e, "VRM")) then V0
       else Unknown,
   }
 }
 
 fn extensions(vrm: Vrm) -> Option[json.Value] =
-  json.get(vrm.glb.json_data, "extensions")
+  value.get(vrm.glb.json_data, "extensions")
 
 fn vrm_root(vrm: Vrm) -> Option[json.Value] =
   match extensions(vrm) {
     none => none,
     some(ext) => match vrm.version {
-      V1 => json.get(ext, "VRMC_vrm"),
-      V0 => json.get(ext, "VRM"),
+      V1 => value.get(ext, "VRMC_vrm"),
+      V0 => value.get(ext, "VRM"),
       Unknown => none,
     },
   }
 
 fn meta(vrm: Vrm) -> Option[json.Value] =
   match vrm_root(vrm) {
-    some(root) => json.get(root, "meta"),
+    some(root) => value.get(root, "meta"),
     none => none,
   }
 
 fn title(vrm: Vrm) -> String = {
   let key = if vrm.version == V1 then "name" else "title"
   match meta(vrm) {
-    some(m) => option.unwrap_or(json.get_string(m, key), ""),
+    some(m) => value.get_string(m, key) ?? "",
     none => "",
   }
 }
@@ -78,14 +78,14 @@ fn title(vrm: Vrm) -> String = {
 fn author(vrm: Vrm) -> String =
   match meta(vrm) {
     some(m) => match vrm.version {
-      V1 => match json.get_array(m, "authors") {
+      V1 => match value.get_array(m, "authors") {
         some(arr) => {
-          let strs = list.filter_map(arr, json.as_string)
+          let strs = list.filter_map(arr, (x) => value.as_string(x)?)
           list.join(strs, ", ")
         },
         none => "",
       },
-      _ => option.unwrap_or(json.get_string(m, "author"), ""),
+      _ => value.get_string(m, "author") ?? "",
     },
     none => "",
   }
@@ -93,23 +93,23 @@ fn author(vrm: Vrm) -> String =
 fn human_bones(vrm: Vrm) -> List[json.Value] =
   match vrm_root(vrm) {
     none => [],
-    some(root) => match json.get(root, "humanoid") {
+    some(root) => match value.get(root, "humanoid") {
       none => [],
       some(h) => match vrm.version {
-        V1 => match json.get(h, "humanBones") {
+        V1 => match value.get(h, "humanBones") {
           some(bones) => {
-            let entries = json.keys(bones)
+            let entries = (value.as_object(bones) ?? []) |> list.map(((k, _)) => k)
             list.map(entries, (name) => {
-              let node = match json.get(bones, name) {
-                some(b) => option.unwrap_or(json.get_int(b, "node"), -1),
+              let node = match value.get(bones, name) {
+                some(b) => value.get_int(b, "node") ?? -1,
                 none => -1,
               }
-              json.object([("bone", json.from_string(name)), ("node", json.from_int(node))])
+              value.object([("bone", value.string(name)), ("node", value.int(node))])
             })
           },
           none => [],
         },
-        V0 => option.unwrap_or(json.get_array(h, "humanBones"), []),
+        V0 => value.get_array(h, "humanBones") ?? [],
         Unknown => [],
       },
     },
@@ -120,20 +120,20 @@ fn expression_count(vrm: Vrm) -> Int =
     none => 0,
     some(root) => match vrm.version {
       V1 => {
-        let expr = option.unwrap_or(json.get(root, "expressions"), json.null())
-        let preset = match json.get(expr, "preset") {
-          some(p) => list.len(json.keys(p)),
+        let expr = value.get(root, "expressions") ?? value.null()
+        let preset = match value.get(expr, "preset") {
+          some(p) => list.len(value.as_object(p) ?? []),
           none => 0,
         }
-        let custom = match json.get(expr, "custom") {
-          some(c) => list.len(json.keys(c)),
+        let custom = match value.get(expr, "custom") {
+          some(c) => list.len(value.as_object(c) ?? []),
           none => 0,
         }
         preset + custom
       },
       V0 => {
-        let bsm = option.unwrap_or(json.get(root, "blendShapeMaster"), json.null())
-        match json.get_array(bsm, "blendShapeGroups") {
+        let bsm = value.get(root, "blendShapeMaster") ?? value.null()
+        match value.get_array(bsm, "blendShapeGroups") {
           some(g) => list.len(g),
           none => 0,
         }
@@ -143,21 +143,21 @@ fn expression_count(vrm: Vrm) -> Int =
   }
 
 fn count(j: json.Value, key: String) -> Int =
-  match json.get_array(j, key) {
+  match value.get_array(j, key) {
     some(a) => list.len(a),
     none => 0,
   }
 
 fn summary(vrm: Vrm) -> json.Value =
-  json.object([
-    ("version", json.from_string(version_string(vrm.version))),
-    ("title", json.from_string(title(vrm))),
-    ("author", json.from_string(author(vrm))),
-    ("meshes", json.from_int(count(vrm.glb.json_data, "meshes"))),
-    ("nodes", json.from_int(count(vrm.glb.json_data, "nodes"))),
-    ("materials", json.from_int(count(vrm.glb.json_data, "materials"))),
-    ("textures", json.from_int(count(vrm.glb.json_data, "textures"))),
-    ("images", json.from_int(count(vrm.glb.json_data, "images"))),
-    ("human_bones", json.from_int(list.len(human_bones(vrm)))),
-    ("expressions", json.from_int(expression_count(vrm))),
+  value.object([
+    ("version", value.string(version_string(vrm.version))),
+    ("title", value.string(title(vrm))),
+    ("author", value.string(author(vrm))),
+    ("meshes", value.int(count(vrm.glb.json_data, "meshes"))),
+    ("nodes", value.int(count(vrm.glb.json_data, "nodes"))),
+    ("materials", value.int(count(vrm.glb.json_data, "materials"))),
+    ("textures", value.int(count(vrm.glb.json_data, "textures"))),
+    ("images", value.int(count(vrm.glb.json_data, "images"))),
+    ("human_bones", value.int(list.len(human_bones(vrm)))),
+    ("expressions", value.int(expression_count(vrm))),
   ])

@@ -530,8 +530,11 @@ const Obsid = {
 
         // Mesh
         create_mesh(id){ meshes.set(N(id), newMesh()); },
-        upload_mesh(id, vert_ptr, vert_count, idx_ptr, idx_count){
-          uploadMesh(N(id), N(vert_ptr), N(vert_count), N(idx_ptr), N(idx_count));
+        // Buffers arrive as ffi.Region (ADR-0031 D3): (base, len) pairs, len in
+        // bytes as the runtime holds it. Counts are clamped to what fits.
+        upload_mesh(id, vert_ptr, vert_len, vert_count, idx_ptr, idx_len, idx_count){
+          uploadMesh(N(id), N(vert_ptr), Math.min(N(vert_count), Math.floor(N(vert_len) / (VERT_FLOATS * 4))),
+                     N(idx_ptr), Math.min(N(idx_count), Math.floor(N(idx_len) / 2)));
         },
         set_mesh_position(id, x, y, z){
           const m = meshes.get(N(id)); if (m) m.pos = [x,y,z];
@@ -562,7 +565,11 @@ const Obsid = {
         },
 
         // Texture
-        upload_texture(id, data_ptr, width, height){
+        upload_texture(id, data_ptr, data_len, width, height){
+          if (N(width) * N(height) * 4 > N(data_len)) {
+            console.warn(`obsid: upload_texture ${N(id)}: ${N(width)}x${N(height)} RGBA needs more than the ${N(data_len)} bytes given`);
+            return;
+          }
           uploadTexture(N(id), N(data_ptr), N(width), N(height));
         },
         set_mesh_texture(mesh_id, tex_id){
@@ -578,8 +585,8 @@ const Obsid = {
         upload_texture_raw(id, data_ptr, data_len){
           uploadTextureRaw(N(id), N(data_ptr), N(data_len));
         },
-        update_mesh_verts(id, vert_ptr, vert_count){
-          updateMeshVerts(N(id), N(vert_ptr), N(vert_count));
+        update_mesh_verts(id, vert_ptr, vert_len, vert_count){
+          updateMeshVerts(N(id), N(vert_ptr), Math.min(N(vert_count), Math.floor(N(vert_len) / (VERT_FLOATS * 4))));
         },
         set_mesh_toon(mesh_id, shade_r, shade_g, shade_b, threshold){
           const m = meshes.get(N(mesh_id));

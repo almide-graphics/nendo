@@ -143,8 +143,9 @@ const AlmideWebGL = {
         buffer_data_u16(target, dataPtr, usage) {
           gl.bufferData(N(target), readListI64asU16(dataPtr), N(usage));
         },
-        // Zero-copy uploads from a raw Bytes payload (bytes.data_ptr points at
-        // the raw payload, with NO [len][cap] header). byte_len is in bytes.
+        // Zero-copy uploads from a Bytes payload passed as ffi.region(b): an
+        // ffi.Region crosses as (base, byte_len), the length the runtime holds
+        // (ADR-0031 D3).
         // Preferred for large meshes (VRM) over the List[Float] variants.
         buffer_data_f32_ptr(target, ptr, byte_len, usage) {
           const view = new Float32Array(memory.buffer, N(ptr), N(byte_len) / 4);

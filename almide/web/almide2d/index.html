@@ -30,9 +30,12 @@ AlmideWebGL.load("avatar2d.wasm","canvas").then(async i=>{
   const mem=i.exports.memory;
   i.exports.set_aspect(innerWidth/innerHeight);
   const png=new Uint8Array(await (await fetch("avatar.png")).arrayBuffer());
-  const p=Number(i.exports.__alloc(png.length));
-  new Uint8Array(mem.buffer,p,png.length).set(png);
-  i.exports.load_avatar(BigInt(p),BigInt(png.length));
+  // an Almide Bytes value: [len][cap][payload]; a Bytes param is its i32 address
+  const p=Number(i.exports.__alloc(8+png.length));
+  const dv=new DataView(mem.buffer);
+  dv.setInt32(p,png.length,true); dv.setInt32(p+4,png.length,true);
+  new Uint8Array(mem.buffer,p+8,png.length).set(png);
+  i.exports.load_avatar(p);
   hud.textContent="almide2d ready — マウスで追従";
   addEventListener("pointermove",e=>{
     i.exports.set_pointer((e.clientX/innerWidth)*2-1,(e.clientY/innerHeight)*2-1);

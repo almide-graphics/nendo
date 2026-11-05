@@ -2,17 +2,18 @@ module main
 
 import json
 import vrm
+import env
 import process
 
 effect fn main() -> Unit = {
-  let args = process.args()
-  let cmd = list.get(args, 1)
+  let args = env.args()
+  let cmd = list.get(args, 0)
 
   match cmd {
-    some("inspect") => cmd_inspect(args),
-    some("validate") => cmd_validate(args),
-    some("tree") => cmd_tree(args),
-    some("dump") => cmd_dump(args),
+    some("inspect") => cmd_inspect(args)!,
+    some("validate") => cmd_validate(args)!,
+    some("tree") => cmd_tree(args)!,
+    some("dump") => cmd_dump(args)!,
     some(other) => println("Unknown command: ${other}\n${usage()}"),
     none => println(usage()),
   }
@@ -30,29 +31,29 @@ fn fmt_int(v: Option[Int]) -> String =
 // ---- Inspect ----
 
 effect fn cmd_inspect(args: List[String]) -> Unit = {
-  guard option.is_some(list.get(args, 2)) else { println("Usage: nendo inspect <file>"); () }
-  let path = option.unwrap_or(list.get(args, 2), "")
+  guard option.is_some(list.get(args, 1)) else { println("Usage: nendo inspect <file>"); () }
+  let path = list.get(args, 1) ?? ""
   let v = match vrm.load(path) { ok(v) => v, err(e) => { println("Error: " + e); process.exit(1) } }
 
   let s = vrm.summary(v)
-  println(option.unwrap_or(json.get_string(s, "version"), "?"))
-  println("  Title:  ${option.unwrap_or(json.get_string(s, "title"), "(none)")}")
-  println("  Author: ${option.unwrap_or(json.get_string(s, "author"), "(none)")}")
+  println(value.get_string(s, "version") ?? "?")
+  println("  Title:  ${value.get_string(s, "title") ?? "(none)"}")
+  println("  Author: ${value.get_string(s, "author") ?? "(none)"}")
   println("")
-  println("  Meshes:      ${fmt_int(json.get_int(s, "meshes"))}")
-  println("  Nodes:       ${fmt_int(json.get_int(s, "nodes"))}")
-  println("  Materials:   ${fmt_int(json.get_int(s, "materials"))}")
-  println("  Textures:    ${fmt_int(json.get_int(s, "textures"))}")
-  println("  Images:      ${fmt_int(json.get_int(s, "images"))}")
-  println("  Bones:       ${fmt_int(json.get_int(s, "human_bones"))}")
-  println("  Expressions: ${fmt_int(json.get_int(s, "expressions"))}")
+  println("  Meshes:      ${fmt_int(value.get_int(s, "meshes"))}")
+  println("  Nodes:       ${fmt_int(value.get_int(s, "nodes"))}")
+  println("  Materials:   ${fmt_int(value.get_int(s, "materials"))}")
+  println("  Textures:    ${fmt_int(value.get_int(s, "textures"))}")
+  println("  Images:      ${fmt_int(value.get_int(s, "images"))}")
+  println("  Bones:       ${fmt_int(value.get_int(s, "human_bones"))}")
+  println("  Expressions: ${fmt_int(value.get_int(s, "expressions"))}")
 
   let bones = vrm.human_bones(v)
   if list.len(bones) > 0 then {
     println("\nHumanoid Bones:")
     for b in bones {
-      let name = option.unwrap_or(json.get_string(b, "bone"), "?")
-      let node = fmt_int(json.get_int(b, "node"))
+      let name = value.get_string(b, "bone") ?? "?"
+      let node = fmt_int(value.get_int(b, "node"))
       println("  ${name}: node ${node}")
     }
   } else {}
@@ -61,8 +62,8 @@ effect fn cmd_inspect(args: List[String]) -> Unit = {
 // ---- Validate ----
 
 effect fn cmd_validate(args: List[String]) -> Unit = {
-  guard option.is_some(list.get(args, 2)) else { println("Usage: nendo validate <file>"); () }
-  let path = option.unwrap_or(list.get(args, 2), "")
+  guard option.is_some(list.get(args, 1)) else { println("Usage: nendo validate <file>"); () }
+  let path = list.get(args, 1) ?? ""
   let v = match vrm.load(path) { ok(v) => v, err(e) => { println("Error: " + e); process.exit(1) } }
 
   var errors = 0
@@ -90,7 +91,7 @@ effect fn cmd_validate(args: List[String]) -> Unit = {
     "rightUpperLeg", "rightLowerLeg", "rightFoot"]
 
   let bones = vrm.human_bones(v)
-  let bone_names = list.map(bones, (b) => option.unwrap_or(json.get_string(b, "bone"), ""))
+  let bone_names = list.map(bones, (b) => value.get_string(b, "bone") ?? "")
 
   for req in required {
     if not list.contains(bone_names, req) then {
@@ -109,21 +110,21 @@ effect fn cmd_validate(args: List[String]) -> Unit = {
 // ---- Tree ----
 
 effect fn cmd_tree(args: List[String]) -> Unit = {
-  guard option.is_some(list.get(args, 2)) else { println("Usage: nendo tree <file>"); () }
-  let path = option.unwrap_or(list.get(args, 2), "")
+  guard option.is_some(list.get(args, 1)) else { println("Usage: nendo tree <file>"); () }
+  let path = list.get(args, 1) ?? ""
   let v = match vrm.load(path) { ok(v) => v, err(e) => { println("Error: " + e); process.exit(1) } }
 
-  let nodes = option.unwrap_or(json.get_array(v.glb.json_data, "nodes"), [])
-  let scenes = option.unwrap_or(json.get_array(v.glb.json_data, "scenes"), [])
-  let scene_idx = option.unwrap_or(json.get_int(v.glb.json_data, "scene"), 0)
+  let nodes = value.get_array(v.glb.json_data, "nodes") ?? []
+  let scenes = value.get_array(v.glb.json_data, "scenes") ?? []
+  let scene_idx = value.get_int(v.glb.json_data, "scene") ?? 0
 
   let root_nodes = match list.get(scenes, scene_idx) {
-    some(s) => option.unwrap_or(json.get_array(s, "nodes"), []),
+    some(s) => value.get_array(s, "nodes") ?? [],
     none => [],
   }
 
   for rn in root_nodes {
-    let idx = option.unwrap_or(json.as_int(rn), 0)
+    let idx = value.as_int(rn)? ?? 0
     print_node(nodes, idx, "")
   }
 }
@@ -132,11 +133,11 @@ fn print_node(nodes: List[json.Value], idx: Int, prefix: String) -> Unit = {
   match list.get(nodes, idx) {
     none => {},
     some(node) => {
-      let name = option.unwrap_or(json.get_string(node, "name"), "node_${int.to_string(idx)}")
+      let name = value.get_string(node, "name") ?? "node_${int.to_string(idx)}"
       println("${prefix}${name}")
-      let children = option.unwrap_or(json.get_array(node, "children"), [])
+      let children = value.get_array(node, "children") ?? []
       for c in children {
-        let child_idx = option.unwrap_or(json.as_int(c), 0)
+        let child_idx = value.as_int(c)? ?? 0
         print_node(nodes, child_idx, prefix + "  ")
       }
     },
@@ -146,13 +147,13 @@ fn print_node(nodes: List[json.Value], idx: Int, prefix: String) -> Unit = {
 // ---- Dump ----
 
 effect fn cmd_dump(args: List[String]) -> Unit = {
-  guard option.is_some(list.get(args, 2)) else { println("Usage: nendo dump <file>"); () }
-  let path = option.unwrap_or(list.get(args, 2), "")
+  guard option.is_some(list.get(args, 1)) else { println("Usage: nendo dump <file>"); () }
+  let path = list.get(args, 1) ?? ""
   let v = match vrm.load(path) { ok(v) => v, err(e) => { println("Error: " + e); process.exit(1) } }
 
-  match list.get(args, 3) {
+  match list.get(args, 2) {
     some(name) => match vrm.extensions(v) {
-      some(ext) => match json.get(ext, name) {
+      some(ext) => match value.get(ext, name) {
         some(data) => println(json.stringify_pretty(data)),
         none => println("Extension '${name}' not found"),
       },
