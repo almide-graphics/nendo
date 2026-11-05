@@ -1,0 +1,4 @@
+# almide.lock — auto-generated, do not edit
+
+lumen = { git = "https://github.com/almide-graphics/lumen.git", ref = "main", commit = "501ef0f0d4b7b632f4487f4fdb71ec95ec808c3d" }
+obsid = { git = "https://github.com/almide-graphics/obsid.git", ref = "main", commit = "41d4180b71fc1efedb4d377d3b2384e67dc9feb9" }
